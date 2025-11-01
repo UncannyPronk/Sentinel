@@ -410,36 +410,123 @@ class BrowserTab(QWidget):
         self.scroll_area.setWidget(self.browser)
         layout.addWidget(self.scroll_area)
 
-
 # ------------------------
 # Main Window
 # ------------------------
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.showMaximized()
+        self.setWindowTitle("Sentinel Browser")
+        self.setWindowFlags(Qt.FramelessWindowHint)
+        self.setMinimumSize(900, 600)
 
+        # ---- Custom Title Bar ----
+        title_bar = QWidget()
+        title_layout = QHBoxLayout(title_bar)
+        title_layout.setContentsMargins(5, 2, 5, 2)
+        title_layout.setSpacing(10)
+
+        title_label = QLabel("🛰 Sentinel Browser")
+        title_label.setStyleSheet("font-size: 16px; font-weight: bold; color: white;")
+
+        btn_min = QPushButton("—")
+        btn_max = QPushButton("⬜")
+        btn_close = QPushButton("✕")
+
+        for b in [btn_min, btn_max, btn_close]:
+            b.setFixedSize(30, 30)
+            b.setStyleSheet("""
+                QPushButton {
+                    color: white;
+                    background-color: #444;
+                    border: none;
+                    font-size: 14px;
+                }
+                QPushButton:hover { background-color: #666; }
+                QPushButton:pressed { background-color: #222; }
+            """)
+
+        btn_min.clicked.connect(self.showMinimized)
+        btn_max.clicked.connect(self.toggle_maximize)
+        btn_close.clicked.connect(self.close)
+
+        title_layout.addWidget(title_label)
+        title_layout.addStretch()
+        title_layout.addWidget(btn_min)
+        title_layout.addWidget(btn_max)
+        title_layout.addWidget(btn_close)
+
+        # ---- Navigation Toolbar ----
         navbar = QToolBar()
-        self.addToolBar(navbar)
+        navbar.setMovable(False)
+
+        self.back_btn = QAction("←", self)
+        self.forward_btn = QAction("→", self)
+        self.reload_btn = QAction("⟳", self)
+
+        self.back_btn.triggered.connect(self.go_back)
+        self.forward_btn.triggered.connect(self.go_forward)
+        self.reload_btn.triggered.connect(self.reload_page)
+
+        navbar.addAction(self.back_btn)
+        navbar.addAction(self.forward_btn)
+        navbar.addAction(self.reload_btn)
 
         self.url_bar = QLineEdit()
         self.url_bar.returnPressed.connect(self.goto_url)
         navbar.addWidget(self.url_bar)
 
+        # ---- Tabs ----
         self.tabs = QTabWidget()
         self.tabs.setTabPosition(QTabWidget.South)
         self.tabs.setTabsClosable(True)
         self.tabs.tabCloseRequested.connect(self.close_tab)
-        self.setCentralWidget(self.tabs)
+        self.tabs.tabBarClicked.connect(self.handle_plus_tab)
 
+        # ---- Layout ----
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        main_layout.addWidget(title_bar)
+        main_layout.addWidget(navbar)
+        main_layout.addWidget(self.tabs)
+
+        container = QWidget()
+        container.setLayout(main_layout)
+        self.setCentralWidget(container)
+
+        # ---- Threads and Tabs ----
         self.loader_thread = None
-
         self.add_new_tab("Home")
         self.add_plus_tab()
 
+        # Shortcuts
         QShortcut(QKeySequence("Ctrl+T"), self).activated.connect(lambda: self.add_new_tab("New Tab"))
         QShortcut(QKeySequence("Ctrl+W"), self).activated.connect(lambda: self.close_tab(self.tabs.currentIndex()))
 
+        # ---- Title Bar Dragging ----
+        title_bar.mousePressEvent = self.mousePressEvent
+        title_bar.mouseMoveEvent = self.mouseMoveEvent
+        self.offset = None
+
+    # --- Window Dragging ---
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.offset = event.pos()
+
+    def mouseMoveEvent(self, event):
+        if self.offset is not None and event.buttons() == Qt.LeftButton:
+            self.move(self.pos() + event.pos() - self.offset)
+
+    def toggle_maximize(self):
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
+    # --------------------------
+    # Browser Logic
+    # --------------------------
     def current_browser(self):
         current_widget = self.tabs.currentWidget()
         if isinstance(current_widget, BrowserTab):
@@ -459,11 +546,11 @@ class MainWindow(QMainWindow):
             browser.setHtml("<h1>This domain is blocked as malicious!</h1>")
             return
 
-        # Show loading state
+        # Show loading
         browser.show_loading()
         self.url_bar.setDisabled(True)
 
-        # Background thread to load page
+        # Load in background
         self.loader_thread = PageLoader(url_string)
         self.loader_thread.finished.connect(lambda html: self.display_page(browser, html))
         self.loader_thread.error.connect(lambda err: self.display_page(browser, err))
@@ -474,6 +561,20 @@ class MainWindow(QMainWindow):
         self.url_bar.setDisabled(False)
         self.loader_thread = None
 
+    def go_back(self):
+        print("[Back button clicked]")
+
+    def go_forward(self):
+        print("[Forward button clicked]")
+
+    def reload_page(self):
+        browser = self.current_browser()
+        if browser:
+            self.goto_url()
+
+    # --------------------------
+    # Tabs
+    # --------------------------
     def add_new_tab(self, name="New Tab", switch=True):
         new_tab = BrowserTab(name)
         idx = self.tabs.insertTab(self.tabs.count() - 1, new_tab, name)
@@ -481,18 +582,22 @@ class MainWindow(QMainWindow):
             self.tabs.setCurrentIndex(idx)
 
     def close_tab(self, index):
-        if self.tabs.count() > 2 and index != self.tabs.count() - 1:
+        # Prevent closing "+" tab
+        if self.tabs.tabText(index) == "+":
+            return
+        if self.tabs.count() > 1:
             self.tabs.removeTab(index)
 
     def add_plus_tab(self):
         plus_widget = QWidget()
         idx = self.tabs.addTab(plus_widget, "+")
-        self.tabs.tabBarClicked.connect(self.handle_plus_tab)
+        # Make sure "+" tab has no close button
+        self.tabs.tabBar().setTabButton(idx, QTabBar.RightSide, None)
 
     def handle_plus_tab(self, index):
-        if index == self.tabs.count() - 1:
+        if self.tabs.tabText(index) == "+":
             self.add_new_tab("New Tab")
-
+            self.tabs.setCurrentIndex(self.tabs.count() - 2)
 
 # ------------------------
 # Run App
