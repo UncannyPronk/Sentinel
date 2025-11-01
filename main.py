@@ -1,0 +1,503 @@
+import sys
+import requests
+import re
+from PyQt5.QtGui import QFont, QKeySequence
+from PyQt5.QtCore import *
+from PyQt5.QtWidgets import *
+from html.parser import HTMLParser
+from urllib.parse import urlparse, urljoin
+
+# ------------------------
+# Blocklist
+# ------------------------
+blocklist_sources = [
+    "https://someonewhocares.org/hosts/zero/hosts",
+    "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
+    "https://phishing.army/download/phishing_army_blocklist.txt",
+    "https://mirror.cedia.org.ec/malwaredomains/justdomains",
+    "https://urlhaus.abuse.ch/downloads/text/"
+]
+
+blocked_domains = []
+for url in blocklist_sources:
+    try:
+        response = requests.get(url, timeout=4)
+        if response.status_code == 200:
+            for line in response.text.splitlines():
+                if line and not line.startswith("#") and not line.startswith("127.") and not line.startswith("::1"):
+                    parts = line.split()
+                    domain = parts[-1] if len(parts) > 0 else None
+                    if domain and "." in domain:
+                        blocked_domains.append(domain)
+    except:
+        pass
+
+
+def check_safety(url, blocklist=[]):
+    return any(bad_url in url for bad_url in blocklist)
+
+
+def sanitize_url(url):
+    url = url.strip()
+    if not url:
+        return None
+    if not url.startswith("http"):
+        url = "https://" + url
+    parsed = urlparse(url)
+    if not parsed.netloc:
+        return None
+    return url
+
+
+# ------------------------
+# HTML Parser
+# ------------------------
+class Node:
+    def __init__(self, tag="", attrs=None, text="", parent=None):
+        self.tag = tag
+        self.attrs = attrs or {}
+        self.text = text
+        self.children = []
+        self.parent = parent
+
+class TreeHTMLParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.stack = []
+        self.root = Node("root")
+
+    def handle_starttag(self, tag, attrs):
+        parent = self.stack[-1] if self.stack else None
+        node = Node(tag, dict(attrs), parent=parent)
+        if parent:
+            parent.children.append(node)
+        else:
+            self.root.children.append(node)
+        self.stack.append(node)
+
+    def handle_endtag(self, tag):
+        if self.stack and self.stack[-1].tag == tag:
+            self.stack.pop()
+
+    def handle_data(self, data):
+        if data.strip():
+            node = Node(text=data.strip())
+            if self.stack:
+                self.stack[-1].children.append(node)
+            else:
+                self.root.children.append(node)
+
+
+# ------------------------
+# Worker Thread for Page Loading
+# ------------------------
+class PageLoader(QThread):
+    finished = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, url):
+        super().__init__()
+        self.url = url
+
+    def run(self):
+        try:
+            r = requests.get(self.url, timeout=7, headers={"User-Agent": "SentinelBrowser/0.1"})
+            if r.status_code == 200:
+                html = re.sub(r"<(script|style).*?>.*?</\1>", "", r.text, flags=re.DOTALL)
+                self.finished.emit(html)
+            else:
+                self.error.emit(f"<h1>Error {r.status_code}</h1>")
+        except Exception as e:
+            self.error.emit(f"<h1>Connection Error</h1><p>{e}</p>")
+
+
+# ------------------------
+# Browser Widget
+# ------------------------
+class BrowserWidget(QWidget):
+    def __init__(self, html="<h1>Welcome to Sentinel Browser Engine</h1>"):
+        super().__init__()
+        self.layout = QVBoxLayout(self)
+        self.layout.setAlignment(Qt.AlignTop)
+        self.layout.setSpacing(10)
+        self.layout.setContentsMargins(20, 20, 20, 20)
+        self.setHtml(html)
+
+    def clear_layout(self):
+        while self.layout.count():
+            item = self.layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    def setHtml(self, html):
+        self.clear_layout()
+        parser = TreeHTMLParser()
+        parser.feed(html)
+        self.root_node = parser.root
+        self.render_nodes(self.root_node)
+
+    def show_loading(self):
+        self.clear_layout()
+        lbl = QLabel("⏳ Loading...")
+        lbl.setAlignment(Qt.AlignCenter)
+        lbl.setStyleSheet("font-size: 18px; color: #555; padding: 20px;")
+        self.layout.addWidget(lbl)
+
+    def render_nodes(self, node):
+        for child in node.children:
+            tag = child.tag.lower() if child.tag else ""
+
+            if tag == "button":
+                text = child.text or child.attrs.get("value", "Button")
+                button = QPushButton(text)
+                button.setStyleSheet("""
+                    QPushButton {
+                        border: 2px solid #555;
+                        border-radius: 6px;
+                        padding: 8px 16px;
+                        background-color: #f2f2f2;
+                        font-size: 14px;
+                    }
+                    QPushButton:hover {
+                        background-color: #e6e6e6;
+                    }
+                    QPushButton:pressed {
+                        background-color: #d9d9d9;
+                    }
+                """)
+
+                def find_form(node):
+                    while node:
+                        if node.tag == "form":
+                            return node
+                        node = node.parent
+                    return None
+
+                def on_button_tag_clicked():
+                    form_node = find_form(child)
+                    if form_node:
+                        action = form_node.attrs.get("action", "")
+                        method = form_node.attrs.get("method", "get").lower()
+
+                        # Gather all inputs from this form
+                        data = {}
+                        def collect_inputs(n):
+                            for c in n.children:
+                                if c.tag == "input" and "name" in c.attrs:
+                                    widget = c.attrs.get("_widget")
+                                    if isinstance(widget, QLineEdit):
+                                        data[c.attrs["name"]] = widget.text()
+                                    else:
+                                        data[c.attrs["name"]] = c.attrs.get("value", "")
+                                collect_inputs(c)
+                        collect_inputs(form_node)
+
+                        from urllib.parse import urlencode, urljoin
+                        main_window = self.window()
+                        if not hasattr(main_window, "goto_url"):
+                            print("[Error] Could not find main window to submit form.")
+                            return
+
+                        base_url = main_window.url_bar.text().strip()
+                        if not base_url.startswith("http"):
+                            base_url = "https://" + base_url
+
+                        action_url = urljoin(base_url, action or "")
+
+                        if method == "get":
+                            query = urlencode(data)
+                            target = f"{action_url}?{query}" if query else action_url
+                            main_window.url_bar.setText(target)
+                            main_window.goto_url()
+                        else:
+                            main_window.url_bar.setText(action_url)
+                            main_window.goto_url()
+                    else:
+                        print(f"[Clicked <button>: {text}] — no form found")
+
+                button.clicked.connect(on_button_tag_clicked)
+                self.layout.addWidget(button)
+
+            elif tag == "input":
+                input_type = child.attrs.get("type", "text").lower()
+                if input_type in ["text", "search"]:
+                    entry = QLineEdit()
+                    entry.setPlaceholderText(child.attrs.get("placeholder", ""))
+                    entry.setStyleSheet("""
+                        QLineEdit {
+                            border: 2px solid #aaa;
+                            border-radius: 4px;
+                            padding: 6px;
+                            font-size: 14px;
+                        }
+                        QLineEdit:focus {
+                            border-color: #448aff;
+                        }
+                    """)
+
+                    # Bind this QLineEdit to its HTML node
+                    child.attrs["_widget"] = entry
+
+                    def find_form(node):
+                        while node:
+                            if node.tag == "form":
+                                return node
+                            node = node.parent
+                        return None
+
+                    def on_return_pressed():
+                        form_node = find_form(child)
+                        if form_node:
+                            action = form_node.attrs.get("action", "")
+                            method = form_node.attrs.get("method", "get").lower()
+
+                            # Gather all inputs from this form
+                            data = {}
+                            def collect_inputs(n):
+                                for c in n.children:
+                                    if c.tag == "input" and "name" in c.attrs:
+                                        # If widget exists, use its live value
+                                        widget = c.attrs.get("_widget")
+                                        if isinstance(widget, QLineEdit):
+                                            data[c.attrs["name"]] = widget.text()
+                                        else:
+                                            data[c.attrs["name"]] = c.attrs.get("value", "")
+                                    collect_inputs(c)
+                            collect_inputs(form_node)
+
+                            from urllib.parse import urlencode, urljoin
+                            main_window = self.window()
+                            if not hasattr(main_window, "goto_url"):
+                                print("[Error] Could not find main window to submit form.")
+                                return
+
+                            base_url = main_window.url_bar.text().strip()
+                            if not base_url.startswith("http"):
+                                base_url = "https://" + base_url
+
+                            action_url = urljoin(base_url, action or "")
+
+                            if method == "get":
+                                query = urlencode(data)
+                                target = f"{action_url}?{query}" if query else action_url
+                                main_window.url_bar.setText(target)
+                                main_window.goto_url()
+                            else:
+                                main_window.url_bar.setText(action_url)
+                                main_window.goto_url()
+                        else:
+                            print("[Enter pressed — no form found]")
+
+                    # Connect Return key
+                    entry.returnPressed.connect(on_return_pressed)
+                    self.layout.addWidget(entry)
+
+                elif input_type in ["button", "submit"]:
+                    text = child.attrs.get("value", child.text or "Button")
+                    button = QPushButton(text)
+                    button.setStyleSheet("""
+                        QPushButton {
+                            border: 2px solid #555;
+                            border-radius: 6px;
+                            padding: 8px 16px;
+                            background-color: #f2f2f2;
+                            font-size: 14px;
+                        }
+                        QPushButton:hover {
+                            background-color: #e6e6e6;
+                        }
+                        QPushButton:pressed {
+                            background-color: #d9d9d9;
+                        }
+                    """)
+
+                    def find_form(node):
+                        while node:
+                            if node.tag == "form":
+                                return node
+                            node = node.parent
+                        return None
+
+                    def on_input_button_clicked():
+                        form_node = find_form(child)
+                        if form_node:
+                            action = form_node.attrs.get("action", "")
+                            method = form_node.attrs.get("method", "get").lower()
+
+                            # Gather all inputs from this form
+                            data = {}
+                            def collect_inputs(n):
+                                for c in n.children:
+                                    if c.tag == "input" and "name" in c.attrs:
+                                        widget = c.attrs.get("_widget")
+                                        if isinstance(widget, QLineEdit):
+                                            data[c.attrs["name"]] = widget.text()
+                                        else:
+                                            data[c.attrs["name"]] = c.attrs.get("value", "")
+                                    collect_inputs(c)
+                            collect_inputs(form_node)
+
+                            from urllib.parse import urlencode, urljoin
+                            main_window = self.window()
+                            if not hasattr(main_window, "goto_url"):
+                                print("[Error] Could not find main window to submit form.")
+                                return
+
+                            base_url = main_window.url_bar.text().strip()
+                            if not base_url.startswith("http"):
+                                base_url = "https://" + base_url
+
+                            action_url = urljoin(base_url, action or "")
+
+                            if method == "get":
+                                query = urlencode(data)
+                                target = f"{action_url}?{query}" if query else action_url
+                                main_window.url_bar.setText(target)
+                                main_window.goto_url()
+                            else:
+                                main_window.url_bar.setText(action_url)
+                                main_window.goto_url()
+                        else:
+                            print(f"[Clicked <input> button: {text}] — no form found")
+
+                    button.clicked.connect(on_input_button_clicked)
+                    self.layout.addWidget(button)
+
+            elif tag in ["h1", "h2", "h3", "p", "b", "i", "u"]:
+                label = QLabel(child.text)
+                label.setWordWrap(True)
+                font = label.font()
+
+                if tag == "h1":
+                    font.setPointSize(32)
+                    font.setBold(True)
+                elif tag == "h2":
+                    font.setPointSize(26)
+                    font.setBold(True)
+                elif tag == "h3":
+                    font.setPointSize(22)
+                    font.setBold(True)
+                elif tag == "b":
+                    font.setBold(True)
+                elif tag == "i":
+                    font.setItalic(True)
+                elif tag == "u":
+                    label.setText(f"<u>{child.text}</u>")
+
+                label.setFont(font)
+                self.layout.addWidget(label)
+
+            elif child.text:
+                lbl = QLabel(child.text)
+                lbl.setWordWrap(True)
+                self.layout.addWidget(lbl)
+
+            # Recursive render
+            if child.children:
+                self.render_nodes(child)
+
+
+# ------------------------
+# Browser Tab
+# ------------------------
+class BrowserTab(QWidget):
+    def __init__(self, name="New Tab"):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.browser = BrowserWidget()
+        self.scroll_area.setWidget(self.browser)
+        layout.addWidget(self.scroll_area)
+
+
+# ------------------------
+# Main Window
+# ------------------------
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.showMaximized()
+
+        navbar = QToolBar()
+        self.addToolBar(navbar)
+
+        self.url_bar = QLineEdit()
+        self.url_bar.returnPressed.connect(self.goto_url)
+        navbar.addWidget(self.url_bar)
+
+        self.tabs = QTabWidget()
+        self.tabs.setTabPosition(QTabWidget.South)
+        self.tabs.setTabsClosable(True)
+        self.tabs.tabCloseRequested.connect(self.close_tab)
+        self.setCentralWidget(self.tabs)
+
+        self.loader_thread = None
+
+        self.add_new_tab("Home")
+        self.add_plus_tab()
+
+        QShortcut(QKeySequence("Ctrl+T"), self).activated.connect(lambda: self.add_new_tab("New Tab"))
+        QShortcut(QKeySequence("Ctrl+W"), self).activated.connect(lambda: self.close_tab(self.tabs.currentIndex()))
+
+    def current_browser(self):
+        current_widget = self.tabs.currentWidget()
+        if isinstance(current_widget, BrowserTab):
+            return current_widget.browser
+        return None
+
+    def goto_url(self):
+        browser = self.current_browser()
+        if not browser:
+            return
+
+        url_string = sanitize_url(self.url_bar.text())
+        if not url_string:
+            browser.setHtml("<h1>Invalid URL</h1>")
+            return
+        elif check_safety(url_string, blocked_domains):
+            browser.setHtml("<h1>This domain is blocked as malicious!</h1>")
+            return
+
+        # Show loading state
+        browser.show_loading()
+        self.url_bar.setDisabled(True)
+
+        # Background thread to load page
+        self.loader_thread = PageLoader(url_string)
+        self.loader_thread.finished.connect(lambda html: self.display_page(browser, html))
+        self.loader_thread.error.connect(lambda err: self.display_page(browser, err))
+        self.loader_thread.start()
+
+    def display_page(self, browser, html):
+        browser.setHtml(html)
+        self.url_bar.setDisabled(False)
+        self.loader_thread = None
+
+    def add_new_tab(self, name="New Tab", switch=True):
+        new_tab = BrowserTab(name)
+        idx = self.tabs.insertTab(self.tabs.count() - 1, new_tab, name)
+        if switch:
+            self.tabs.setCurrentIndex(idx)
+
+    def close_tab(self, index):
+        if self.tabs.count() > 2 and index != self.tabs.count() - 1:
+            self.tabs.removeTab(index)
+
+    def add_plus_tab(self):
+        plus_widget = QWidget()
+        idx = self.tabs.addTab(plus_widget, "+")
+        self.tabs.tabBarClicked.connect(self.handle_plus_tab)
+
+    def handle_plus_tab(self, index):
+        if index == self.tabs.count() - 1:
+            self.add_new_tab("New Tab")
+
+
+# ------------------------
+# Run App
+# ------------------------
+app = QApplication(sys.argv)
+window = MainWindow()
+window.show()
+app.exec_()
