@@ -6,60 +6,89 @@ from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
 from html.parser import HTMLParser
 from urllib.parse import urlparse, urljoin
-import string
-from urllib.parse import urlparse
-import re
 
-TRUSTED_DOMAINS = {
-    "google.com", "wikipedia.org", "youtube.com", "github.com",
-    "instagram.com", "facebook.com", "twitter.com", "x.com",
-}
+def _get_base_domain(host: str) -> str:
+    """Return a simple registrable base domain: last two labels (best-effort)."""
+    if not host:
+        return ""
+    parts = host.split(".")
+    if len(parts) <= 2:
+        return host.lower()
+    return ".".join(parts[-2:]).lower()
 
-SUSPICIOUS_PATTERNS = [
-    r"insta(?:-)?gram",   # fake Instagram domains
-    r"faceb(?:0|o)ok",    # fake Facebook domains
-    r"twittter",           # typo-based fakes
-    r"go0gle",             # zero instead of 'o'
-    r"paypa1",             # 1 instead of 'l'
-    r"micros0ft",          # 0 instead of 'o'
-]
-
-def is_suspicious_domain(domain: str) -> bool:
-    domain = domain.lower()
-    if not domain:
-        return True
-    # Direct match of trusted domain
-    for safe in TRUSTED_DOMAINS:
-        if domain.endswith(safe):
-            return False
-    # Pattern-based detection
-    for pattern in SUSPICIOUS_PATTERNS:
-        if re.search(pattern, domain):
-            return True
-    # Looks like a homograph/Unicode domain (Punycode)
-    if domain.startswith("xn--"):
-        return True
-    # Too many subdomains — common in phishing
-    if domain.count(".") > 3:
-        return True
-    return False
-
-
-def is_cross_domain_submit(base_url: str, target_url: str) -> bool:
-    """Check if form is submitted to a different domain."""
+def _is_ascii_hostname(host: str) -> bool:
+    """Return False for punycode or any non-ascii host (simple homograph defense)."""
+    if not host:
+        return False
+    # punycode starts with 'xn--'
     try:
-        base = urlparse(base_url)
-        target = urlparse(target_url)
-        if not target.netloc:
-            return False  # relative path is fine
-        return base.netloc and target.netloc and base.netloc != target.netloc
+        return host.isascii() and not host.lower().startswith("xn--")
     except Exception:
-        return True
+        return False
 
 def is_ascii_url(url: str) -> bool:
-    """Check that the URL contains only ASCII characters."""
-    allowed_chars = string.ascii_letters + string.digits + string.punctuation + " "
-    return all(c in allowed_chars for c in url)
+    """Return True if the entire URL (including query) is plain ASCII — no punycode, emojis, or homoglyphs."""
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        # Reject punycode or non-ascii hostnames
+        if not host.isascii() or host.lower().startswith("xn--"):
+            return False
+        # Allow ASCII-only paths and queries (no special unicode)
+        return all(ord(ch) < 128 for ch in parsed.path + parsed.query)
+    except Exception:
+        return False
+
+def is_cross_domain_submit(base_url: str, target_url: str) -> bool:
+    """
+    Detects if a form submission crosses from one domain to another.
+    Returns True if base and target domains are different.
+    """
+    try:
+        base_host = urlparse(base_url).hostname or ""
+        target_host = urlparse(target_url).hostname or ""
+        if not base_host or not target_host:
+            return False
+
+        # Extract base registrable domains
+        base_domain = _get_base_domain(base_host)
+        target_domain = _get_base_domain(target_host)
+
+        return base_domain != target_domain
+    except Exception:
+        return False
+
+
+def is_suspicious_domain(domain: str) -> bool:
+    """
+    Flags domains that *look* like common phishing attempts.
+    For example: instagram-login.com, goog1e.com, etc.
+    """
+    if not domain:
+        return False
+
+    domain = domain.lower()
+
+    # Basic phishing indicators (adjust as needed)
+    suspicious_keywords = [
+        "login", "verify", "update", "secure", "signin", "account", "password"
+    ]
+    known_brands = [
+        "google", "facebook", "instagram", "paypal", "twitter", "amazon"
+    ]
+
+    # If domain combines brand + phishing word, it's suspicious
+    for brand in known_brands:
+        for word in suspicious_keywords:
+            if brand in domain and word in domain and not domain.endswith(f"{brand}.com"):
+                return True
+
+    # If domain contains brand name but is not the official one
+    for brand in known_brands:
+        if brand in domain and not domain.endswith(f"{brand}.com"):
+            return True
+
+    return False
 
 # ------------------------
 # Blocklist
@@ -90,7 +119,6 @@ for url in blocklist_sources:
 def check_safety(url, blocklist=[]):
     return any(bad_url in url for bad_url in blocklist)
 
-
 def sanitize_url(url):
     url = url.strip()
     if not url:
@@ -101,7 +129,6 @@ def sanitize_url(url):
     if not parsed.netloc:
         return None
     return url
-
 
 # ------------------------
 # HTML Parser
@@ -197,6 +224,59 @@ class BrowserWidget(QWidget):
         lbl.setStyleSheet("font-size: 18px; color: #555; padding: 20px;")
         self.layout.addWidget(lbl)
 
+    def find_form(node):
+        while node:
+            if node.tag == "form":
+                return node
+            node = node.parent
+        return None
+
+    def on_return_pressed():
+        form_node = find_form(child)
+        # gather live values from bound widgets (if any)
+        data = {}
+        def collect_inputs(n):
+            for c in n.children:
+                if c.tag == "input" and "name" in c.attrs:
+                    widget = c.attrs.get("_widget")
+                    if isinstance(widget, QLineEdit):
+                        data[c.attrs["name"]] = widget.text()
+                    else:
+                        data[c.attrs["name"]] = c.attrs.get("value", "")
+                collect_inputs(c)
+        if form_node:
+            collect_inputs(form_node)
+            # build action (resolve relative with base)
+            action = form_node.attrs.get("action", "")
+            method = form_node.attrs.get("method", "get").lower()
+            from urllib.parse import urlencode, urljoin
+            main_window = self.window()
+            base_url = main_window.url_bar.text().strip()
+            action_url = urljoin(base_url if base_url else "", action or "")
+            if method == "get":
+                query = urlencode(data)
+                target = f"{action_url}?{query}" if query else action_url
+            else:
+                target = action_url
+        else:
+            # fallback: if no form, treat this as a direct search using current page as base
+            val = entry.text().strip()
+            if not val:
+                print("[Enter pressed — empty]")
+                return
+            # For simple behavior: navigate to base + "?q=value" if base has path else treat as search term
+            main_window = self.window()
+            base_url = main_window.url_bar.text().strip()
+            if base_url:
+                target = urljoin(base_url if base_url.startswith(("http://","https://")) else "https://"+base_url, f"?q={val}")
+            else:
+                # if no base, use the typed text as an URL-like target (will be resolved by secure_navigate)
+                target = val
+
+        # Use the central navigator instead of goto_url directly
+        main_window = self.window()
+        main_window.secure_navigate(target, base_url=main_window.url_bar.text().strip())
+
     def render_nodes(self, node):
         for child in node.children:
             tag = child.tag.lower() if child.tag else ""
@@ -227,49 +307,34 @@ class BrowserWidget(QWidget):
                         node = node.parent
                     return None
 
-                def on_button_tag_clicked():
+                def on_button_clicked():
                     form_node = find_form(child)
+                    data = {}
+                    def collect_inputs(n):
+                        for c in n.children:
+                            if c.tag == "input" and "name" in c.attrs:
+                                widget = c.attrs.get("_widget")
+                                if isinstance(widget, QLineEdit):
+                                    data[c.attrs["name"]] = widget.text()
+                                else:
+                                    data[c.attrs["name"]] = c.attrs.get("value", "")
+                            collect_inputs(c)
                     if form_node:
+                        collect_inputs(form_node)
                         action = form_node.attrs.get("action", "")
                         method = form_node.attrs.get("method", "get").lower()
-
-                        data = {}
-                        def collect_inputs(n):
-                            for c in n.children:
-                                if c.tag == "input" and "name" in c.attrs:
-                                    widget = c.attrs.get("_widget")
-                                    if isinstance(widget, QLineEdit):
-                                        data[c.attrs["name"]] = widget.text()
-                                    else:
-                                        data[c.attrs["name"]] = c.attrs.get("value", "")
-                                collect_inputs(c)
-                        collect_inputs(form_node)
-
                         from urllib.parse import urlencode, urljoin
                         main_window = self.window()
-                        if not hasattr(main_window, "goto_url"):
-                            print("[Error] Could not find main window to submit form.")
-                            return
-
                         base_url = main_window.url_bar.text().strip()
-                        if not base_url.startswith("http"):
-                            base_url = "https://" + base_url
-
-                        action_url = urljoin(base_url, action or "")
-
+                        action_url = urljoin(base_url if base_url.startswith(("http://","https://")) else "https://"+base_url, action or "")
                         if method == "get":
                             query = urlencode(data)
                             target = f"{action_url}?{query}" if query else action_url
-                            main_window.url_bar.setText(target)
-                            main_window.goto_url()
                         else:
-                            main_window.url_bar.setText(action_url)
-                            main_window.goto_url()
+                            target = action_url
+                        main_window.secure_navigate(target, base_url=base_url)
                     else:
-                        print(f"[Clicked <button>: {text}] — no form found")
-
-                button.clicked.connect(on_button_tag_clicked)
-                self.layout.addWidget(button)
+                        print(f"[Clicked <button>: {text}] (no form found)")
 
             elif tag == "input":
                 input_type = child.attrs.get("type", "text").lower()
@@ -371,47 +436,36 @@ class BrowserWidget(QWidget):
                             node = node.parent
                         return None
 
-                    def on_input_button_clicked():
+                    def on_button_clicked():
                         form_node = find_form(child)
+                        data = {}
+                        def collect_inputs(n):
+                            for c in n.children:
+                                if c.tag == "input" and "name" in c.attrs:
+                                    widget = c.attrs.get("_widget")
+                                    if isinstance(widget, QLineEdit):
+                                        data[c.attrs["name"]] = widget.text()
+                                    else:
+                                        data[c.attrs["name"]] = c.attrs.get("value", "")
+                                collect_inputs(c)
                         if form_node:
+                            collect_inputs(form_node)
                             action = form_node.attrs.get("action", "")
                             method = form_node.attrs.get("method", "get").lower()
-
-                            # Gather all inputs from this form
-                            data = {}
-                            def collect_inputs(n):
-                                for c in n.children:
-                                    if c.tag == "input" and "name" in c.attrs:
-                                        widget = c.attrs.get("_widget")
-                                        if isinstance(widget, QLineEdit):
-                                            data[c.attrs["name"]] = widget.text()
-                                        else:
-                                            data[c.attrs["name"]] = c.attrs.get("value", "")
-                                    collect_inputs(c)
-                            collect_inputs(form_node)
-
                             from urllib.parse import urlencode, urljoin
                             main_window = self.window()
-                            if not hasattr(main_window, "goto_url"):
-                                print("[Error] Could not find main window to submit form.")
-                                return
-
                             base_url = main_window.url_bar.text().strip()
-                            if not base_url.startswith("http"):
-                                base_url = "https://" + base_url
-
-                            action_url = urljoin(base_url, action or "")
-
+                            action_url = urljoin(base_url if base_url.startswith(("http://","https://")) else "https://"+base_url, action or "")
                             if method == "get":
                                 query = urlencode(data)
                                 target = f"{action_url}?{query}" if query else action_url
-                                main_window.secure_navigate(target, base_url)
                             else:
-                                main_window.secure_navigate(action_url, base_url)
+                                target = action_url
+                            main_window.secure_navigate(target, base_url=base_url)
                         else:
                             print(f"[Clicked <input> button: {text}] — no form found")
 
-                    button.clicked.connect(on_input_button_clicked)
+                    button.clicked.connect(on_button_clicked)
                     self.layout.addWidget(button)
 
             elif tag in ["h1", "h2", "h3", "p", "b", "i", "u"]:
@@ -460,6 +514,7 @@ class BrowserTab(QWidget):
         self.browser = BrowserWidget()
         self.scroll_area.setWidget(self.browser)
         layout.addWidget(self.scroll_area)
+
 
 # ------------------------
 # Main Window
@@ -533,6 +588,7 @@ class MainWindow(QMainWindow):
         self.tabs.setTabsClosable(True)
         self.tabs.tabCloseRequested.connect(self.close_tab)
         self.tabs.tabBarClicked.connect(self.handle_plus_tab)
+        self.tab_history = {}
 
         # ---- Layout ----
         main_layout = QVBoxLayout()
@@ -622,7 +678,7 @@ class MainWindow(QMainWindow):
             return current_widget.browser
         return None
 
-    def goto_url(self):
+    def goto_url(self, add_to_history=True):
         browser = self.current_browser()
         if not browser:
             return
@@ -646,6 +702,17 @@ class MainWindow(QMainWindow):
         browser.show_loading()
         self.url_bar.setDisabled(True)
 
+        # ---- Add to history ----
+        if add_to_history:
+            idx = self.tabs.currentIndex()
+            if idx not in self.tab_history:
+                self.tab_history[idx] = {"urls": [], "pos": -1}
+            hist = self.tab_history[idx]
+            hist["urls"] = hist["urls"][: hist["pos"] + 1]  # cut forward history
+            hist["urls"].append(url_string)
+            hist["pos"] += 1
+            self.update_nav_buttons()
+
         self.loader_thread = PageLoader(url_string)
         self.loader_thread.finished.connect(lambda html: self.display_page(browser, html))
         self.loader_thread.error.connect(lambda err: self.display_page(browser, err))
@@ -655,17 +722,45 @@ class MainWindow(QMainWindow):
         browser.setHtml(html)
         self.url_bar.setDisabled(False)
         self.loader_thread = None
+    
+    def update_nav_buttons(self):
+        idx = self.tabs.currentIndex()
+        if idx not in self.tab_history:
+            self.back_btn.setEnabled(False)
+            self.forward_btn.setEnabled(False)
+            return
+        hist = self.tab_history[idx]
+        self.back_btn.setEnabled(hist["pos"] > 0)
+        self.forward_btn.setEnabled(hist["pos"] < len(hist["urls"]) - 1)
 
     def go_back(self):
-        print("[Back button clicked]")
-
+        idx = self.tabs.currentIndex()
+        if idx not in self.tab_history:
+            return
+        hist = self.tab_history[idx]
+        if hist["pos"] > 0:
+            hist["pos"] -= 1
+            prev_url = hist["urls"][hist["pos"]]
+            self.url_bar.setText(prev_url)
+            self.goto_url(add_to_history=False)
+        self.update_nav_buttons()
+    
     def go_forward(self):
-        print("[Forward button clicked]")
-
+        idx = self.tabs.currentIndex()
+        if idx not in self.tab_history:
+            return
+        hist = self.tab_history[idx]
+        if hist["pos"] < len(hist["urls"]) - 1:
+            hist["pos"] += 1
+            next_url = hist["urls"][hist["pos"]]
+            self.url_bar.setText(next_url)
+            self.goto_url(add_to_history=False)
+        self.update_nav_buttons()
+    
     def reload_page(self):
-        browser = self.current_browser()
-        if browser:
-            self.goto_url()
+        current_url = self.url_bar.text().strip()
+        if current_url:
+            self.goto_url(add_to_history=False)
 
     # --------------------------
     # Tabs
@@ -673,6 +768,7 @@ class MainWindow(QMainWindow):
     def add_new_tab(self, name="New Tab", switch=True):
         new_tab = BrowserTab(name)
         idx = self.tabs.insertTab(self.tabs.count() - 1, new_tab, name)
+        self.tab_history[idx] = {"urls": [], "pos": -1}
         if switch:
             self.tabs.setCurrentIndex(idx)
 
