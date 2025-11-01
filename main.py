@@ -41,23 +41,46 @@ def is_ascii_url(url: str) -> bool:
 
 def is_cross_domain_submit(base_url: str, target_url: str) -> bool:
     """
-    Detects if a form submission crosses from one domain to another.
-    Returns True if base and target domains are different.
+    Blocks only true cross-domain or encoded phishing submissions.
+    Allows relative and same-domain URLs.
     """
     try:
-        base_host = urlparse(base_url).hostname or ""
-        target_host = urlparse(target_url).hostname or ""
-        if not base_host or not target_host:
+        # ✅ Decode percent-encoded URLs first
+        target_url = unquote(target_url or "")
+
+        base = urlparse(base_url)
+        target = urlparse(target_url)
+
+        # ✅ Allow relative URLs
+        if not target.netloc:
             return False
 
-        # Extract base registrable domains
-        base_domain = _get_base_domain(base_host)
-        target_domain = _get_base_domain(target_host)
+        base_host = (base.hostname or "").lower().lstrip("www.")
+        target_host = (target.hostname or "").lower().lstrip("www.")
 
-        return base_domain != target_domain
-    except Exception:
+        # ✅ Allow same host or subdomains
+        if base_host == target_host or target_host.endswith("." + base_host) or base_host.endswith("." + target_host):
+            return False
+
+        # 🚫 Block if encoded malicious domain (punycode / IDN / non-ascii)
+        if not all(ord(c) < 128 for c in target_host):
+            return True
+        if target_host.startswith("xn--"):  # punycode
+            return True
+
+        # 🚫 Block if root domains differ
+        base_parts = base_host.split(".")
+        target_parts = target_host.split(".")
+        if len(base_parts) >= 2 and len(target_parts) >= 2:
+            base_root = ".".join(base_parts[-2:])
+            target_root = ".".join(target_parts[-2:])
+            if base_root != target_root:
+                return True
+
         return False
 
+    except Exception:
+        return False
 
 def is_suspicious_domain(domain: str) -> bool:
     """
@@ -80,12 +103,12 @@ def is_suspicious_domain(domain: str) -> bool:
     # If domain combines brand + phishing word, it's suspicious
     for brand in known_brands:
         for word in suspicious_keywords:
-            if brand in domain and word in domain and not domain.endswith(f"{brand}.com"):
+            if brand in domain and word in domain and not domain.endswith(f"{brand}.com") and not domain.endswith(f"{brand}.org"):
                 return True
 
     # If domain contains brand name but is not the official one
     for brand in known_brands:
-        if brand in domain and not domain.endswith(f"{brand}.com"):
+        if brand in domain and not domain.endswith(f"{brand}.com") and not domain.endswith(f"{brand}.org"):
             return True
 
     return False
