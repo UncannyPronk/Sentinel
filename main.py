@@ -7,6 +7,54 @@ from PyQt5.QtWidgets import *
 from html.parser import HTMLParser
 from urllib.parse import urlparse, urljoin
 import string
+from urllib.parse import urlparse
+import re
+
+TRUSTED_DOMAINS = {
+    "google.com", "wikipedia.org", "youtube.com", "github.com",
+    "instagram.com", "facebook.com", "twitter.com", "x.com",
+}
+
+SUSPICIOUS_PATTERNS = [
+    r"insta(?:-)?gram",   # fake Instagram domains
+    r"faceb(?:0|o)ok",    # fake Facebook domains
+    r"twittter",           # typo-based fakes
+    r"go0gle",             # zero instead of 'o'
+    r"paypa1",             # 1 instead of 'l'
+    r"micros0ft",          # 0 instead of 'o'
+]
+
+def is_suspicious_domain(domain: str) -> bool:
+    domain = domain.lower()
+    if not domain:
+        return True
+    # Direct match of trusted domain
+    for safe in TRUSTED_DOMAINS:
+        if domain.endswith(safe):
+            return False
+    # Pattern-based detection
+    for pattern in SUSPICIOUS_PATTERNS:
+        if re.search(pattern, domain):
+            return True
+    # Looks like a homograph/Unicode domain (Punycode)
+    if domain.startswith("xn--"):
+        return True
+    # Too many subdomains — common in phishing
+    if domain.count(".") > 3:
+        return True
+    return False
+
+
+def is_cross_domain_submit(base_url: str, target_url: str) -> bool:
+    """Check if form is submitted to a different domain."""
+    try:
+        base = urlparse(base_url)
+        target = urlparse(target_url)
+        if not target.netloc:
+            return False  # relative path is fine
+        return base.netloc and target.netloc and base.netloc != target.netloc
+    except Exception:
+        return True
 
 def is_ascii_url(url: str) -> bool:
     """Check that the URL contains only ASCII characters."""
@@ -185,7 +233,6 @@ class BrowserWidget(QWidget):
                         action = form_node.attrs.get("action", "")
                         method = form_node.attrs.get("method", "get").lower()
 
-                        # Gather all inputs from this form
                         data = {}
                         def collect_inputs(n):
                             for c in n.children:
@@ -358,11 +405,9 @@ class BrowserWidget(QWidget):
                             if method == "get":
                                 query = urlencode(data)
                                 target = f"{action_url}?{query}" if query else action_url
-                                main_window.url_bar.setText(target)
-                                main_window.goto_url()
+                                main_window.secure_navigate(target, base_url)
                             else:
-                                main_window.url_bar.setText(action_url)
-                                main_window.goto_url()
+                                main_window.secure_navigate(action_url, base_url)
                         else:
                             print(f"[Clicked <input> button: {text}] — no form found")
 
@@ -514,6 +559,44 @@ class MainWindow(QMainWindow):
         title_bar.mousePressEvent = self.mousePressEvent
         title_bar.mouseMoveEvent = self.mouseMoveEvent
         self.offset = None
+
+    def secure_navigate(self, target_url: str, base_url: str = ""):
+        """Centralized safe navigation with security checks."""
+        from urllib.parse import urlparse, urljoin
+
+        if not base_url:
+            base_url = self.url_bar.text().strip()
+        if not base_url.startswith("http"):
+            base_url = "https://" + base_url
+
+        target_url = urljoin(base_url, target_url)
+        parsed_domain = urlparse(target_url).netloc
+
+        # --- Security checks ---
+        if is_cross_domain_submit(base_url, target_url):
+            warning_html = f"""
+            <h1>⚠️ Suspicious Form Submission</h1>
+            <p>This form tries to submit to another domain:</p>
+            <p><b>{target_url}</b></p>
+            <p>This could be phishing. Submission has been blocked.</p>
+            """
+            self.current_browser().setHtml(warning_html)
+            return
+
+        if is_suspicious_domain(parsed_domain):
+            warning_html = f"""
+            <h1>⚠️ Suspicious Domain Detected</h1>
+            <p>The domain <b>{parsed_domain}</b> looks suspicious or fake.</p>
+            <p>This might be an imitation of a known service.</p>
+            """
+            self.current_browser().setHtml(warning_html)
+            return
+
+        # --- If passed checks ---
+        print(f"[Safe Navigation] {target_url}")
+        self.url_bar.setText(target_url)
+        self.goto_url()
+
 
     # --- Window Dragging ---
     def mousePressEvent(self, event):
