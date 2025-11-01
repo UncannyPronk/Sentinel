@@ -7,6 +7,37 @@ from PyQt5.QtWidgets import *
 from html.parser import HTMLParser
 from urllib.parse import urlparse, urljoin
 
+AD_KEYWORDS = [
+    "ads", "ad_", "ad-", "advert", "sponsor", "banner", "promoted",
+    "affiliate", "doubleclick", "googlesyndication", "tracking",
+    "popunder", "clickserve", "outbrain", "taboola", "metrics"
+]
+
+def remove_ads_from_html(html):
+    # Remove known ad-serving iframes and images
+    html = re.sub(
+        r'<iframe[^>]+(ad|banner|sponsor|doubleclick|googlesyndication)[^>]*>.*?</iframe>',
+        '', html, flags=re.DOTALL | re.IGNORECASE
+    )
+    html = re.sub(
+        r'<img[^>]+(ad|promo|sponsor|banner)[^>]*>',
+        '', html, flags=re.IGNORECASE
+    )
+
+    # Remove divs with ad-related classes or IDs
+    html = re.sub(
+        r'<div[^>]+(id|class)\s*=\s*["\'].*?(%s).*?["\'][^>]*>.*?</div>' % "|".join(AD_KEYWORDS),
+        '', html, flags=re.DOTALL | re.IGNORECASE
+    )
+
+    # Remove scripts that reference ad networks
+    html = re.sub(
+        r'<script[^>]+(ad|doubleclick|googlesyndication|tracking)[^>]*>.*?</script>',
+        '', html, flags=re.DOTALL | re.IGNORECASE
+    )
+
+    return html
+
 def _get_base_domain(host: str) -> str:
     """Return a simple registrable base domain: last two labels (best-effort)."""
     if not host:
@@ -138,6 +169,18 @@ for url in blocklist_sources:
     except:
         pass
 
+AD_DOMAINS = {
+    "doubleclick.net",
+    "googlesyndication.com",
+    "adservice.google.com",
+    "ads.yahoo.com",
+    "taboola.com",
+    "outbrain.com",
+    "revcontent.com",
+    "facebook.net",
+    "scorecardresearch.com"
+}
+blocked_domains.extend(AD_DOMAINS)
 
 def check_safety(url, blocklist=[]):
     return any(bad_url in url for bad_url in blocklist)
@@ -208,6 +251,7 @@ class PageLoader(QThread):
             r = requests.get(self.url, timeout=7, headers={"User-Agent": "SentinelBrowser/0.1"})
             if r.status_code == 200:
                 html = re.sub(r"<(script|style).*?>.*?</\1>", "", r.text, flags=re.DOTALL)
+                html = remove_ads_from_html(html)
                 self.finished.emit(html)
             else:
                 self.error.emit(f"<h1>Error {r.status_code}</h1>")
