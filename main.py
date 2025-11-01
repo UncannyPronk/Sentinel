@@ -6,6 +6,12 @@ from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
 from html.parser import HTMLParser
 from urllib.parse import urlparse, urljoin
+import string
+
+def is_ascii_url(url: str) -> bool:
+    """Check that the URL contains only ASCII characters."""
+    allowed_chars = string.ascii_letters + string.digits + string.punctuation + " "
+    return all(c in allowed_chars for c in url)
 
 # ------------------------
 # Blocklist
@@ -538,19 +544,25 @@ class MainWindow(QMainWindow):
         if not browser:
             return
 
-        url_string = sanitize_url(self.url_bar.text())
+        url_string = sanitize_url(self.url_bar.text().strip())
         if not url_string:
             browser.setHtml("<h1>Invalid URL</h1>")
             return
-        elif check_safety(url_string, blocked_domains):
+
+        # ---- Homograph protection ----
+        if not is_ascii_url(url_string):
+            browser.setHtml("<h1>⚠️ Potential homograph attack detected!</h1><p>The URL contains non-ASCII characters and may be unsafe.</p>")
+            return
+
+        # ---- Domain safety check ----
+        if check_safety(url_string, blocked_domains):
             browser.setHtml("<h1>This domain is blocked as malicious!</h1>")
             return
 
-        # Show loading
+        # ---- Begin loading ----
         browser.show_loading()
         self.url_bar.setDisabled(True)
 
-        # Load in background
         self.loader_thread = PageLoader(url_string)
         self.loader_thread.finished.connect(lambda html: self.display_page(browser, html))
         self.loader_thread.error.connect(lambda err: self.display_page(browser, err))
