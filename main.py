@@ -1,6 +1,7 @@
 import sys
 import requests
 import re
+from bs4 import BeautifulSoup
 from PyQt5.QtGui import QFont, QKeySequence
 from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
@@ -203,7 +204,7 @@ class Node:
     def __init__(self, tag="", attrs=None, text="", parent=None):
         self.tag = tag
         self.attrs = attrs or {}
-        self.text = text
+        self.text = ""
         self.children = []
         self.parent = parent
 
@@ -214,26 +215,48 @@ class TreeHTMLParser(HTMLParser):
         self.root = Node("root")
 
     def handle_starttag(self, tag, attrs):
-        parent = self.stack[-1] if self.stack else None
-        node = Node(tag, dict(attrs), parent=parent)
-        if parent:
-            parent.children.append(node)
+        node = Node(tag.lower(), dict(attrs))
+        if self.stack:
+            self.stack[-1].children.append(node)
+            node.parent = self.stack[-1]
         else:
             self.root.children.append(node)
         self.stack.append(node)
 
     def handle_endtag(self, tag):
-        if self.stack and self.stack[-1].tag == tag:
-            self.stack.pop()
+        tag = tag.lower()
+        while self.stack:
+            node = self.stack.pop()
+            if node.tag == tag:
+                return
 
     def handle_data(self, data):
-        if data.strip():
-            node = Node(text=data.strip())
-            if self.stack:
-                self.stack[-1].children.append(node)
-            else:
-                self.root.children.append(node)
+        data = data.strip()
+        if not data:
+            return
+        if self.stack:
+            # ✅ append data to the *currently open* tag
+            self.stack[-1].text += data + "\n"
+        else:
+            self.root.children.append(Node(text=data))
+\
+def collect_css(root):
+    inline_css = []
+    linked_css = []
 
+    def walk(node):
+        if node.tag == "style" and node.text.strip():
+            inline_css.append(node.text.strip())
+        elif node.tag == "link" and node.attrs.get("rel") == "stylesheet":
+            href = node.attrs.get("href")
+            if href:
+                linked_css.append(href)
+        for c in node.children:
+            walk(c)
+
+    walk(root)
+    print(f"[Found {len(inline_css)} inline CSS blocks, {len(linked_css)} linked CSS files]")
+    return inline_css, linked_css
 
 # ------------------------
 # Worker Thread for Page Loading
@@ -250,7 +273,7 @@ class PageLoader(QThread):
         try:
             r = requests.get(self.url, timeout=7, headers={"User-Agent": "SentinelBrowser/0.1"})
             if r.status_code == 200:
-                html = re.sub(r"<(script|style).*?>.*?</\1>", "", r.text, flags=re.DOTALL)
+                html = re.sub(r"<(script).*?>.*?</\1>", "", r.text, flags=re.DOTALL)
                 html = remove_ads_from_html(html)
                 self.finished.emit(html)
             else:
@@ -278,10 +301,93 @@ class BrowserWidget(QWidget):
                 item.widget().deleteLater()
 
     def setHtml(self, html):
+        # --- STEP 1: Parse HTML using your existing parser ---
         self.clear_layout()
         parser = TreeHTMLParser()
         parser.feed(html)
         self.root_node = parser.root
+
+        # --- STEP 2: Collect inline + linked CSS ---
+        self.inline_css = []
+        self.linked_css = []
+
+        def collect_css(node):
+            if node.tag == "style" and node.text.strip():
+                self.inline_css.append(node.text.strip())
+            elif node.tag == "link" and node.attrs.get("rel") == "stylesheet":
+                href = node.attrs.get("href")
+                if href:
+                    self.linked_css.append(href)
+            for c in node.children:
+                collect_css(c)
+
+        collect_css(self.root_node)
+        print(f"[Found {len(self.inline_css)} inline CSS blocks, {len(self.linked_css)} linked CSS files]")
+
+        # --- STEP 3: Fetch external CSS if linked ---
+        for href in self.linked_css:
+            try:
+                r = requests.get(href, timeout=3)
+                if r.status_code == 200:
+                    self.inline_css.append(r.text)
+                    print(f"[CSS loaded successfully from {href}]")
+            except Exception as e:
+                print(f"[Error loading CSS from {href}: {e}]")
+
+        # --- STEP 4: Parse and translate CSS into Qt equivalents ---
+        def parse_css_rules(css_text):
+            rules = {}
+            pattern = re.compile(r'([^{]+){([^}]+)}')
+            for selector, body in pattern.findall(css_text):
+                selector = selector.strip()
+                body = body.strip()
+                rules[selector] = body
+            return rules
+
+        def translate_css_to_qt(css_rules):
+            qt_rules = {}
+            for selector, body in css_rules.items():
+                if selector in ["body", "html"]:
+                    qt_selector = "*"
+                elif selector.startswith("input"):
+                    qt_selector = "QLineEdit"
+                elif selector.startswith("button"):
+                    qt_selector = "QPushButton"
+                elif selector.startswith("p"):
+                    qt_selector = "QLabel"
+                elif selector.startswith("h"):
+                    qt_selector = "QLabel"
+                else:
+                    qt_selector = selector
+
+                # 🧠 Wrap properly in braces for Qt
+                qt_style = f"{qt_selector} {{\n{body}\n}}"
+                qt_rules[selector] = qt_style
+            return qt_rules
+
+        self.css_rules = {}
+        for css_text in self.inline_css:
+            parsed = parse_css_rules(css_text)
+            self.css_rules.update(translate_css_to_qt(parsed))
+
+        if self.css_rules:
+            print(f"[Loaded {len(self.css_rules)} CSS rules]")
+        else:
+            print("[No CSS rules found]")
+        
+        body_bg_color = None
+        if hasattr(self, "css_rules") and "body" in self.css_rules:
+            body_style = self.css_rules["body"]
+            match = re.search(r'background-color\s*:\s*([^;]+);?', body_style)
+            if match:
+                body_bg_color = match.group(1).strip()
+                print(f"[Detected page background color: {body_bg_color}]")
+
+        if body_bg_color:
+            # Apply it to the main widget (entire page)
+            self.setStyleSheet(f"background-color: {body_bg_color};")
+
+        # --- STEP 5: Render HTML elements into widgets ---
         self.render_nodes(self.root_node)
 
     def show_loading(self):
@@ -347,6 +453,8 @@ class BrowserWidget(QWidget):
     def render_nodes(self, node):
         for child in node.children:
             tag = child.tag.lower() if child.tag else ""
+            if tag in ["style", "head"]:
+                continue
 
             if tag == "button":
                 text = child.text or child.attrs.get("value", "Button")
@@ -366,6 +474,10 @@ class BrowserWidget(QWidget):
                         background-color: #d9d9d9;
                     }
                 """)
+
+                # 🧠 NEW — apply external or inline CSS if available
+                if hasattr(self, "css_rules") and tag in self.css_rules:
+                    button.setStyleSheet(self.css_rules[tag])
 
                 def find_form(node):
                     while node:
@@ -402,6 +514,8 @@ class BrowserWidget(QWidget):
                         main_window.secure_navigate(target, base_url=base_url)
                     else:
                         print(f"[Clicked <button>: {text}] (no form found)")
+                button.clicked.connect(on_button_clicked)
+                self.layout.addWidget(button)
 
             elif tag == "input":
                 input_type = child.attrs.get("type", "text").lower()
@@ -420,7 +534,10 @@ class BrowserWidget(QWidget):
                         }
                     """)
 
-                    # Bind this QLineEdit to its HTML node
+                    # 🧠 NEW — apply CSS for inputs
+                    if hasattr(self, "css_rules") and "input" in self.css_rules:
+                        entry.setStyleSheet(self.css_rules["input"])
+
                     child.attrs["_widget"] = entry
 
                     def find_form(node):
@@ -435,13 +552,10 @@ class BrowserWidget(QWidget):
                         if form_node:
                             action = form_node.attrs.get("action", "")
                             method = form_node.attrs.get("method", "get").lower()
-
-                            # Gather all inputs from this form
                             data = {}
                             def collect_inputs(n):
                                 for c in n.children:
                                     if c.tag == "input" and "name" in c.attrs:
-                                        # If widget exists, use its live value
                                         widget = c.attrs.get("_widget")
                                         if isinstance(widget, QLineEdit):
                                             data[c.attrs["name"]] = widget.text()
@@ -449,19 +563,12 @@ class BrowserWidget(QWidget):
                                             data[c.attrs["name"]] = c.attrs.get("value", "")
                                     collect_inputs(c)
                             collect_inputs(form_node)
-
                             from urllib.parse import urlencode, urljoin
                             main_window = self.window()
-                            if not hasattr(main_window, "goto_url"):
-                                print("[Error] Could not find main window to submit form.")
-                                return
-
                             base_url = main_window.url_bar.text().strip()
                             if not base_url.startswith("http"):
                                 base_url = "https://" + base_url
-
                             action_url = urljoin(base_url, action or "")
-
                             if method == "get":
                                 query = urlencode(data)
                                 target = f"{action_url}?{query}" if query else action_url
@@ -473,7 +580,6 @@ class BrowserWidget(QWidget):
                         else:
                             print("[Enter pressed — no form found]")
 
-                    # Connect Return key
                     entry.returnPressed.connect(on_return_pressed)
                     self.layout.addWidget(entry)
 
@@ -495,6 +601,10 @@ class BrowserWidget(QWidget):
                             background-color: #d9d9d9;
                         }
                     """)
+
+                    # 🧠 NEW — apply CSS rule if present
+                    if hasattr(self, "css_rules") and "input[type=submit]" in self.css_rules:
+                        button.setStyleSheet(self.css_rules["input[type=submit]"])
 
                     def find_form(node):
                         while node:
@@ -531,23 +641,31 @@ class BrowserWidget(QWidget):
                             main_window.secure_navigate(target, base_url=base_url)
                         else:
                             print(f"[Clicked <input> button: {text}] — no form found")
-
                     button.clicked.connect(on_button_clicked)
                     self.layout.addWidget(button)
 
-            elif tag in ["h1", "h2", "h3", "p", "b", "i", "u"]:
+            elif tag in ["h1", "h2", "h3", "h4", "h5", "h6", "p", "b", "i", "u"]:
                 label = QLabel(child.text)
                 label.setWordWrap(True)
                 font = label.font()
 
                 if tag == "h1":
-                    font.setPointSize(32)
+                    font.setPointSize(36)
                     font.setBold(True)
                 elif tag == "h2":
-                    font.setPointSize(26)
+                    font.setPointSize(32)
                     font.setBold(True)
                 elif tag == "h3":
-                    font.setPointSize(22)
+                    font.setPointSize(28)
+                    font.setBold(True)
+                elif tag == "h4":
+                    font.setPointSize(24)
+                    font.setBold(True)
+                elif tag == "h5":
+                    font.setPointSize(20)
+                    font.setBold(True)
+                elif tag == "h6":
+                    font.setPointSize(16)
                     font.setBold(True)
                 elif tag == "b":
                     font.setBold(True)
@@ -557,17 +675,33 @@ class BrowserWidget(QWidget):
                     label.setText(f"<u>{child.text}</u>")
 
                 label.setFont(font)
+
+                if hasattr(self, "css_rules") and tag in self.css_rules:
+                    label.setStyleSheet(self.css_rules[tag])
+
                 self.layout.addWidget(label)
 
             elif child.text:
                 lbl = QLabel(child.text)
                 lbl.setWordWrap(True)
+
+                # 🧠 Try to apply CSS from the parent tag if possible
+                applied_style = None
+                parent_tag = child.parent.tag.lower() if child.parent and child.parent.tag else None
+
+                if hasattr(self, "css_rules"):
+                    if parent_tag and parent_tag in self.css_rules:
+                        applied_style = self.css_rules[parent_tag]
+                    elif "body" in self.css_rules:
+                        applied_style = self.css_rules["body"]
+
+                if applied_style:
+                    lbl.setStyleSheet(applied_style)
+
                 self.layout.addWidget(lbl)
 
-            # Recursive render
             if child.children:
                 self.render_nodes(child)
-
 
 # ------------------------
 # Browser Tab
@@ -581,7 +715,6 @@ class BrowserTab(QWidget):
         self.browser = BrowserWidget()
         self.scroll_area.setWidget(self.browser)
         layout.addWidget(self.scroll_area)
-
 
 # ------------------------
 # Main Window
