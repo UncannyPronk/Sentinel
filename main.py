@@ -288,21 +288,48 @@ class PageLoader(QThread):
 class BrowserWidget(QWidget):
     def __init__(self, html="<h1>Welcome to Sentinel Browser Engine</h1>"):
         super().__init__()
-        self.layout = QVBoxLayout(self)
-        self.layout.setAlignment(Qt.AlignTop)
-        self.layout.setSpacing(10)
-        self.layout.setContentsMargins(20, 20, 20, 20)
+
+        # --- Create a container that acts as the full webpage background ---
+        self.container = QWidget()
+        self.page_layout = QVBoxLayout(self.container)
+        self.page_layout.setAlignment(Qt.AlignTop)
+        self.page_layout.setSpacing(10)
+        self.page_layout.setContentsMargins(20, 20, 20, 20)
+
+        # --- Scroll area to allow page scrolling ---
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setWidget(self.container)
+
+        # --- Outer layout for the entire BrowserWidget ---
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.addWidget(self.scroll)
+
+        # --- Background color (for now, hardcoded) ---
+        # self.container.setStyleSheet("background-color: #ff0000;")
+
+        # --- Existing variables ---
+        self.root_node = None
+        self.inline_css = []
+        self.linked_css = []
+        self.css_rules = {}
+
+        # --- Initial HTML load ---
         self.setHtml(html)
 
     def clear_layout(self):
-        while self.layout.count():
-            item = self.layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        while self.page_layout.count():
+            item = self.page_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
 
     def setHtml(self, html):
         # --- STEP 1: Parse HTML using your existing parser ---
         self.clear_layout()
+        # self.container.setStyleSheet("background-color: #f0f0f0;")
+        # self.setStyleSheet("background-color: #f0f0f0;")
         parser = TreeHTMLParser()
         parser.feed(html)
         self.root_node = parser.root
@@ -383,6 +410,14 @@ class BrowserWidget(QWidget):
                 body_bg_color = match.group(1).strip()
                 print(f"[Detected page background color: {body_bg_color}]")
 
+        # --- Apply body background color if specified ---
+        if "body" in self.css_rules:
+            bg_match = re.search(r'background-color\s*:\s*([^;]+);?', self.css_rules["body"], re.IGNORECASE)
+            if bg_match:
+                color_value = bg_match.group(1).strip()
+                self.container.setStyleSheet(f"background-color: {color_value};")
+                print(f"[Applied background color: {color_value}]")
+
         if body_bg_color:
             # Apply it to the main widget (entire page)
             self.setStyleSheet(f"background-color: {body_bg_color};")
@@ -392,10 +427,12 @@ class BrowserWidget(QWidget):
 
     def show_loading(self):
         self.clear_layout()
+        self.container.setStyleSheet("background-color: #f0f0f0;")
+        self.setStyleSheet("background-color: #f0f0f0;")
         lbl = QLabel("⏳ Loading...")
         lbl.setAlignment(Qt.AlignCenter)
         lbl.setStyleSheet("font-size: 18px; color: #555; padding: 20px;")
-        self.layout.addWidget(lbl)
+        self.page_layout.addWidget(lbl)
 
     def find_form(node):
         while node:
@@ -515,7 +552,7 @@ class BrowserWidget(QWidget):
                     else:
                         print(f"[Clicked <button>: {text}] (no form found)")
                 button.clicked.connect(on_button_clicked)
-                self.layout.addWidget(button)
+                self.page_layout.addWidget(button)
 
             elif tag == "input":
                 input_type = child.attrs.get("type", "text").lower()
@@ -581,7 +618,7 @@ class BrowserWidget(QWidget):
                             print("[Enter pressed — no form found]")
 
                     entry.returnPressed.connect(on_return_pressed)
-                    self.layout.addWidget(entry)
+                    self.page_layout.addWidget(entry)
 
                 elif input_type in ["button", "submit"]:
                     text = child.attrs.get("value", child.text or "Button")
@@ -642,7 +679,7 @@ class BrowserWidget(QWidget):
                         else:
                             print(f"[Clicked <input> button: {text}] — no form found")
                     button.clicked.connect(on_button_clicked)
-                    self.layout.addWidget(button)
+                    self.page_layout.addWidget(button)
 
             elif tag in ["h1", "h2", "h3", "h4", "h5", "h6", "p", "b", "i", "u"]:
                 label = QLabel(child.text)
@@ -679,7 +716,7 @@ class BrowserWidget(QWidget):
                 if hasattr(self, "css_rules") and tag in self.css_rules:
                     label.setStyleSheet(self.css_rules[tag])
 
-                self.layout.addWidget(label)
+                self.page_layout.addWidget(label)
 
             elif child.text:
                 lbl = QLabel(child.text)
@@ -698,7 +735,7 @@ class BrowserWidget(QWidget):
                 if applied_style:
                     lbl.setStyleSheet(applied_style)
 
-                self.layout.addWidget(lbl)
+                self.page_layout.addWidget(lbl)
 
             if child.children:
                 self.render_nodes(child)
@@ -733,7 +770,7 @@ class MainWindow(QMainWindow):
         title_layout.setSpacing(10)
 
         title_label = QLabel("🛰 Sentinel Browser")
-        title_label.setStyleSheet("font-size: 16px; font-weight: bold; color: white;")
+        title_label.setStyleSheet("font-size: 16px; font-weight: bold; color: grey;")
 
         btn_min = QPushButton("—")
         btn_max = QPushButton("⬜")
