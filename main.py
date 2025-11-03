@@ -351,6 +351,18 @@ class BrowserWidget(QWidget):
         collect_css(self.root_node)
         print(f"[Found {len(self.inline_css)} inline CSS blocks, {len(self.linked_css)} linked CSS files]")
 
+        base_url = getattr(self, "base_url", "")
+        for css_url in self.linked_css:
+            full_url = urljoin(base_url, css_url)
+            try:
+                r = requests.get(full_url, timeout=5)
+                if r.status_code == 200:
+                    parsed = parse_css_rules(r.text)
+                    self.css_rules.update(translate_css_to_qt(parsed))
+                    print(f"[Loaded external CSS: {css_url}]")
+            except Exception as e:
+                print(f"[Failed to load external CSS: {css_url}] {e}")
+
         # --- STEP 3: Fetch external CSS if linked ---
         for href in self.linked_css:
             try:
@@ -493,6 +505,11 @@ class BrowserWidget(QWidget):
             if tag in ["style", "head"]:
                 continue
 
+            # # 🧠 Apply inline style if present
+            # inline_style = child.attrs.get("style")
+            # if inline_style:
+            #     widget.setStyleSheet(widget.styleSheet() + "\n" + inline_style)
+
             if tag == "button":
                 text = child.text or child.attrs.get("value", "Button")
                 button = QPushButton(text)
@@ -511,6 +528,9 @@ class BrowserWidget(QWidget):
                         background-color: #d9d9d9;
                     }
                 """)
+
+                if "style" in child.attrs:
+                    button.setStyleSheet(button.styleSheet() + "\n" + child.attrs["style"])
 
                 # 🧠 NEW — apply external or inline CSS if available
                 if hasattr(self, "css_rules") and tag in self.css_rules:
@@ -570,6 +590,9 @@ class BrowserWidget(QWidget):
                             border-color: #448aff;
                         }
                     """)
+                    
+                    if "style" in child.attrs:
+                        button.setStyleSheet(button.styleSheet() + "\n" + child.attrs["style"])
 
                     # 🧠 NEW — apply CSS for inputs
                     if hasattr(self, "css_rules") and "input" in self.css_rules:
@@ -638,6 +661,9 @@ class BrowserWidget(QWidget):
                             background-color: #d9d9d9;
                         }
                     """)
+
+                    if "style" in child.attrs:
+                        button.setStyleSheet(button.styleSheet() + "\n" + child.attrs["style"])
 
                     # 🧠 NEW — apply CSS rule if present
                     if hasattr(self, "css_rules") and "input[type=submit]" in self.css_rules:
@@ -956,6 +982,7 @@ class MainWindow(QMainWindow):
         self.loader_thread.start()
 
     def display_page(self, browser, html):
+        browser.base_url = self.url_bar.text().strip()
         browser.setHtml(html)
         self.url_bar.setDisabled(False)
         self.loader_thread = None
