@@ -1,787 +1,13 @@
 import sys
-import requests
-import re
-from bs4 import BeautifulSoup
-from PyQt5.QtGui import QFont, QKeySequence
-from PyQt5.QtCore import *
-from PyQt5.QtWidgets import *
-from html.parser import HTMLParser
-from urllib.parse import urlparse, urljoin
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QKeySequence
+from PyQt5.QtWidgets import QApplication, QMainWindow, QToolBar, QLineEdit, QAction, QTabWidget, QWidget, QVBoxLayout, QPushButton, QLabel, QShortcut, QTabBar
 
-AD_KEYWORDS = [
-    "ads", "ad_", "ad-", "advert", "sponsor", "banner", "promoted",
-    "affiliate", "doubleclick", "googlesyndication", "tracking",
-    "popunder", "clickserve", "outbrain", "taboola", "metrics"
-]
+from network import PageLoader, sanitize_url, check_safety, blocked_domains
+from browser_widget import BrowserTab
+from security import is_ascii_url, is_cross_domain_submit, is_suspicious_domain
 
-def remove_ads_from_html(html):
-    # Remove known ad-serving iframes and images
-    html = re.sub(
-        r'<iframe[^>]+(ad|banner|sponsor|doubleclick|googlesyndication)[^>]*>.*?</iframe>',
-        '', html, flags=re.DOTALL | re.IGNORECASE
-    )
-    html = re.sub(
-        r'<img[^>]+(ad|promo|sponsor|banner)[^>]*>',
-        '', html, flags=re.IGNORECASE
-    )
 
-    # Remove divs with ad-related classes or IDs
-    html = re.sub(
-        r'<div[^>]+(id|class)\s*=\s*["\'].*?(%s).*?["\'][^>]*>.*?</div>' % "|".join(AD_KEYWORDS),
-        '', html, flags=re.DOTALL | re.IGNORECASE
-    )
-
-    # Remove scripts that reference ad networks
-    html = re.sub(
-        r'<script[^>]+(ad|doubleclick|googlesyndication|tracking)[^>]*>.*?</script>',
-        '', html, flags=re.DOTALL | re.IGNORECASE
-    )
-
-    return html
-
-def _get_base_domain(host: str) -> str:
-    """Return a simple registrable base domain: last two labels (best-effort)."""
-    if not host:
-        return ""
-    parts = host.split(".")
-    if len(parts) <= 2:
-        return host.lower()
-    return ".".join(parts[-2:]).lower()
-
-def _is_ascii_hostname(host: str) -> bool:
-    """Return False for punycode or any non-ascii host (simple homograph defense)."""
-    if not host:
-        return False
-    # punycode starts with 'xn--'
-    try:
-        return host.isascii() and not host.lower().startswith("xn--")
-    except Exception:
-        return False
-
-def is_ascii_url(url: str) -> bool:
-    """Return True if the entire URL (including query) is plain ASCII — no punycode, emojis, or homoglyphs."""
-    try:
-        parsed = urlparse(url)
-        host = parsed.hostname or ""
-        # Reject punycode or non-ascii hostnames
-        if not host.isascii() or host.lower().startswith("xn--"):
-            return False
-        # Allow ASCII-only paths and queries (no special unicode)
-        return all(ord(ch) < 128 for ch in parsed.path + parsed.query)
-    except Exception:
-        return False
-
-def is_cross_domain_submit(base_url: str, target_url: str) -> bool:
-    """
-    Blocks only true cross-domain or encoded phishing submissions.
-    Allows relative and same-domain URLs.
-    """
-    try:
-        # ✅ Decode percent-encoded URLs first
-        target_url = unquote(target_url or "")
-
-        base = urlparse(base_url)
-        target = urlparse(target_url)
-
-        # ✅ Allow relative URLs
-        if not target.netloc:
-            return False
-
-        base_host = (base.hostname or "").lower().lstrip("www.")
-        target_host = (target.hostname or "").lower().lstrip("www.")
-
-        # ✅ Allow same host or subdomains
-        if base_host == target_host or target_host.endswith("." + base_host) or base_host.endswith("." + target_host):
-            return False
-
-        # 🚫 Block if encoded malicious domain (punycode / IDN / non-ascii)
-        if not all(ord(c) < 128 for c in target_host):
-            return True
-        if target_host.startswith("xn--"):  # punycode
-            return True
-
-        # 🚫 Block if root domains differ
-        base_parts = base_host.split(".")
-        target_parts = target_host.split(".")
-        if len(base_parts) >= 2 and len(target_parts) >= 2:
-            base_root = ".".join(base_parts[-2:])
-            target_root = ".".join(target_parts[-2:])
-            if base_root != target_root:
-                return True
-
-        return False
-
-    except Exception:
-        return False
-
-def is_suspicious_domain(domain: str) -> bool:
-    """
-    Flags domains that *look* like common phishing attempts.
-    For example: instagram-login.com, goog1e.com, etc.
-    """
-    if not domain:
-        return False
-
-    domain = domain.lower()
-
-    # Basic phishing indicators (adjust as needed)
-    suspicious_keywords = [
-        "login", "verify", "update", "secure", "signin", "account", "password"
-    ]
-    known_brands = [
-        "google", "facebook", "instagram", "paypal", "twitter", "amazon"
-    ]
-
-    # If domain combines brand + phishing word, it's suspicious
-    for brand in known_brands:
-        for word in suspicious_keywords:
-            if brand in domain and word in domain and not domain.endswith(f"{brand}.com") and not domain.endswith(f"{brand}.org"):
-                return True
-
-    # If domain contains brand name but is not the official one
-    for brand in known_brands:
-        if brand in domain and not domain.endswith(f"{brand}.com") and not domain.endswith(f"{brand}.org"):
-            return True
-
-    return False
-
-# ------------------------
-# Blocklist
-# ------------------------
-blocklist_sources = [
-    "https://someonewhocares.org/hosts/zero/hosts",
-    "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
-    "https://phishing.army/download/phishing_army_blocklist.txt",
-    "https://mirror.cedia.org.ec/malwaredomains/justdomains",
-    "https://urlhaus.abuse.ch/downloads/text/"
-]
-
-blocked_domains = []
-for url in blocklist_sources:
-    try:
-        response = requests.get(url, timeout=4)
-        if response.status_code == 200:
-            for line in response.text.splitlines():
-                if line and not line.startswith("#") and not line.startswith("127.") and not line.startswith("::1"):
-                    parts = line.split()
-                    domain = parts[-1] if len(parts) > 0 else None
-                    if domain and "." in domain:
-                        blocked_domains.append(domain)
-    except:
-        pass
-
-AD_DOMAINS = {
-    "doubleclick.net",
-    "googlesyndication.com",
-    "adservice.google.com",
-    "ads.yahoo.com",
-    "taboola.com",
-    "outbrain.com",
-    "revcontent.com",
-    "facebook.net",
-    "scorecardresearch.com"
-}
-blocked_domains.extend(AD_DOMAINS)
-
-def check_safety(url, blocklist=[]):
-    return any(bad_url in url for bad_url in blocklist)
-
-def sanitize_url(url):
-    url = url.strip()
-    if not url:
-        return None
-    if not url.startswith("http"):
-        url = "https://" + url
-    parsed = urlparse(url)
-    if not parsed.netloc:
-        return None
-    return url
-
-# ------------------------
-# HTML Parser
-# ------------------------
-class Node:
-    def __init__(self, tag="", attrs=None, text="", parent=None):
-        self.tag = tag
-        self.attrs = attrs or {}
-        self.text = ""
-        self.children = []
-        self.parent = parent
-
-class TreeHTMLParser(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.stack = []
-        self.root = Node("root")
-
-    def handle_starttag(self, tag, attrs):
-        node = Node(tag.lower(), dict(attrs))
-        if self.stack:
-            self.stack[-1].children.append(node)
-            node.parent = self.stack[-1]
-        else:
-            self.root.children.append(node)
-        self.stack.append(node)
-
-    def handle_endtag(self, tag):
-        tag = tag.lower()
-        while self.stack:
-            node = self.stack.pop()
-            if node.tag == tag:
-                return
-
-    def handle_data(self, data):
-        data = data.strip()
-        if not data:
-            return
-        if self.stack:
-            # ✅ append data to the *currently open* tag
-            self.stack[-1].text += data + "\n"
-        else:
-            self.root.children.append(Node(text=data))
-\
-def collect_css(root):
-    inline_css = []
-    linked_css = []
-
-    def walk(node):
-        if node.tag == "style" and node.text.strip():
-            inline_css.append(node.text.strip())
-        elif node.tag == "link" and node.attrs.get("rel") == "stylesheet":
-            href = node.attrs.get("href")
-            if href:
-                linked_css.append(href)
-        for c in node.children:
-            walk(c)
-
-    walk(root)
-    print(f"[Found {len(inline_css)} inline CSS blocks, {len(linked_css)} linked CSS files]")
-    return inline_css, linked_css
-
-# ------------------------
-# Worker Thread for Page Loading
-# ------------------------
-class PageLoader(QThread):
-    finished = pyqtSignal(str)
-    error = pyqtSignal(str)
-
-    def __init__(self, url):
-        super().__init__()
-        self.url = url
-
-    def run(self):
-        try:
-            r = requests.get(self.url, timeout=7, headers={"User-Agent": "SentinelBrowser/0.1"})
-            if r.status_code == 200:
-                html = re.sub(r"<(script).*?>.*?</\1>", "", r.text, flags=re.DOTALL)
-                html = remove_ads_from_html(html)
-                self.finished.emit(html)
-            else:
-                self.error.emit(f"<h1>Error {r.status_code}</h1>")
-        except Exception as e:
-            self.error.emit(f"<h1>Connection Error</h1><p>{e}</p>")
-
-
-# ------------------------
-# Browser Widget
-# ------------------------
-class BrowserWidget(QWidget):
-    def __init__(self, html="<h1>Welcome to Sentinel Browser Engine</h1>"):
-        super().__init__()
-
-        # --- Create a container that acts as the full webpage background ---
-        self.container = QWidget()
-        self.page_layout = QVBoxLayout(self.container)
-        self.page_layout.setAlignment(Qt.AlignTop)
-        self.page_layout.setSpacing(10)
-        self.page_layout.setContentsMargins(20, 20, 20, 20)
-
-        # --- Scroll area to allow page scrolling ---
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setWidget(self.container)
-
-        # --- Outer layout for the entire BrowserWidget ---
-        outer_layout = QVBoxLayout(self)
-        outer_layout.setContentsMargins(0, 0, 0, 0)
-        outer_layout.addWidget(self.scroll)
-
-        # --- Background color (for now, hardcoded) ---
-        # self.container.setStyleSheet("background-color: #ff0000;")
-
-        # --- Existing variables ---
-        self.root_node = None
-        self.inline_css = []
-        self.linked_css = []
-        self.css_rules = {}
-
-        # --- Initial HTML load ---
-        self.setHtml(html)
-
-    def clear_layout(self):
-        while self.page_layout.count():
-            item = self.page_layout.takeAt(0)
-            w = item.widget()
-            if w:
-                w.deleteLater()
-
-    def setHtml(self, html):
-        # --- STEP 1: Parse HTML using your existing parser ---
-        self.clear_layout()
-        # self.container.setStyleSheet("background-color: #f0f0f0;")
-        # self.setStyleSheet("background-color: #f0f0f0;")
-        parser = TreeHTMLParser()
-        parser.feed(html)
-        self.root_node = parser.root
-
-        # --- STEP 2: Collect inline + linked CSS ---
-        self.inline_css = []
-        self.linked_css = []
-
-        def collect_css(node):
-            if node.tag == "style" and node.text.strip():
-                self.inline_css.append(node.text.strip())
-            elif node.tag == "link" and node.attrs.get("rel") == "stylesheet":
-                href = node.attrs.get("href")
-                if href:
-                    self.linked_css.append(href)
-            for c in node.children:
-                collect_css(c)
-
-        collect_css(self.root_node)
-        print(f"[Found {len(self.inline_css)} inline CSS blocks, {len(self.linked_css)} linked CSS files]")
-
-        base_url = getattr(self, "base_url", "")
-        for css_url in self.linked_css:
-            full_url = urljoin(base_url, css_url)
-            try:
-                r = requests.get(full_url, timeout=5)
-                if r.status_code == 200:
-                    parsed = parse_css_rules(r.text)
-                    self.css_rules.update(translate_css_to_qt(parsed))
-                    print(f"[Loaded external CSS: {css_url}]")
-            except Exception as e:
-                print(f"[Failed to load external CSS: {css_url}] {e}")
-
-        # --- STEP 3: Fetch external CSS if linked ---
-        for href in self.linked_css:
-            try:
-                r = requests.get(href, timeout=3)
-                if r.status_code == 200:
-                    self.inline_css.append(r.text)
-                    print(f"[CSS loaded successfully from {href}]")
-            except Exception as e:
-                print(f"[Error loading CSS from {href}: {e}]")
-
-        # --- STEP 4: Parse and translate CSS into Qt equivalents ---
-        def parse_css_rules(css_text):
-            rules = {}
-            pattern = re.compile(r'([^{]+){([^}]+)}')
-            for selector, body in pattern.findall(css_text):
-                selector = selector.strip()
-                body = body.strip()
-                rules[selector] = body
-            return rules
-
-        def translate_css_to_qt(css_rules):
-            qt_rules = {}
-            for selector, body in css_rules.items():
-                if selector in ["body", "html"]:
-                    qt_selector = "*"
-                elif selector.startswith("input"):
-                    qt_selector = "QLineEdit"
-                elif selector.startswith("button"):
-                    qt_selector = "QPushButton"
-                elif selector.startswith("p"):
-                    qt_selector = "QLabel"
-                elif selector.startswith("h"):
-                    qt_selector = "QLabel"
-                else:
-                    qt_selector = selector
-
-                # 🧠 Wrap properly in braces for Qt
-                qt_style = f"{qt_selector} {{\n{body}\n}}"
-                qt_rules[selector] = qt_style
-            return qt_rules
-
-        self.css_rules = {}
-        for css_text in self.inline_css:
-            parsed = parse_css_rules(css_text)
-            self.css_rules.update(translate_css_to_qt(parsed))
-
-        if self.css_rules:
-            print(f"[Loaded {len(self.css_rules)} CSS rules]")
-        else:
-            print("[No CSS rules found]")
-        
-        body_bg_color = None
-        if hasattr(self, "css_rules") and "body" in self.css_rules:
-            body_style = self.css_rules["body"]
-            match = re.search(r'background-color\s*:\s*([^;]+);?', body_style)
-            if match:
-                body_bg_color = match.group(1).strip()
-                print(f"[Detected page background color: {body_bg_color}]")
-
-        # --- Apply body background color if specified ---
-        if "body" in self.css_rules:
-            bg_match = re.search(r'background-color\s*:\s*([^;]+);?', self.css_rules["body"], re.IGNORECASE)
-            if bg_match:
-                color_value = bg_match.group(1).strip()
-                self.container.setStyleSheet(f"background-color: {color_value};")
-                print(f"[Applied background color: {color_value}]")
-
-        if body_bg_color:
-            # Apply it to the main widget (entire page)
-            self.setStyleSheet(f"background-color: {body_bg_color};")
-
-        # --- STEP 5: Render HTML elements into widgets ---
-        self.render_nodes(self.root_node)
-
-    def show_loading(self):
-        self.clear_layout()
-        self.container.setStyleSheet("background-color: #f0f0f0;")
-        self.setStyleSheet("background-color: #f0f0f0;")
-        lbl = QLabel("⏳ Loading...")
-        lbl.setAlignment(Qt.AlignCenter)
-        lbl.setStyleSheet("font-size: 18px; color: #555; padding: 20px;")
-        self.page_layout.addWidget(lbl)
-
-    def find_form(node):
-        while node:
-            if node.tag == "form":
-                return node
-            node = node.parent
-        return None
-
-    def on_return_pressed():
-        form_node = find_form(child)
-        # gather live values from bound widgets (if any)
-        data = {}
-        def collect_inputs(n):
-            for c in n.children:
-                if c.tag == "input" and "name" in c.attrs:
-                    widget = c.attrs.get("_widget")
-                    if isinstance(widget, QLineEdit):
-                        data[c.attrs["name"]] = widget.text()
-                    else:
-                        data[c.attrs["name"]] = c.attrs.get("value", "")
-                collect_inputs(c)
-        if form_node:
-            collect_inputs(form_node)
-            # build action (resolve relative with base)
-            action = form_node.attrs.get("action", "")
-            method = form_node.attrs.get("method", "get").lower()
-            from urllib.parse import urlencode, urljoin
-            main_window = self.window()
-            base_url = main_window.url_bar.text().strip()
-            action_url = urljoin(base_url if base_url else "", action or "")
-            if method == "get":
-                query = urlencode(data)
-                target = f"{action_url}?{query}" if query else action_url
-            else:
-                target = action_url
-        else:
-            # fallback: if no form, treat this as a direct search using current page as base
-            val = entry.text().strip()
-            if not val:
-                print("[Enter pressed — empty]")
-                return
-            # For simple behavior: navigate to base + "?q=value" if base has path else treat as search term
-            main_window = self.window()
-            base_url = main_window.url_bar.text().strip()
-            if base_url:
-                target = urljoin(base_url if base_url.startswith(("http://","https://")) else "https://"+base_url, f"?q={val}")
-            else:
-                # if no base, use the typed text as an URL-like target (will be resolved by secure_navigate)
-                target = val
-
-        # Use the central navigator instead of goto_url directly
-        main_window = self.window()
-        main_window.secure_navigate(target, base_url=main_window.url_bar.text().strip())
-
-    def render_nodes(self, node):
-        for child in node.children:
-            tag = child.tag.lower() if child.tag else ""
-            if tag in ["style", "head"]:
-                continue
-
-            # # 🧠 Apply inline style if present
-            # inline_style = child.attrs.get("style")
-            # if inline_style:
-            #     widget.setStyleSheet(widget.styleSheet() + "\n" + inline_style)
-
-            if tag == "button":
-                text = child.text or child.attrs.get("value", "Button")
-                button = QPushButton(text)
-                button.setStyleSheet("""
-                    QPushButton {
-                        border: 2px solid #555;
-                        border-radius: 6px;
-                        padding: 8px 16px;
-                        background-color: #f2f2f2;
-                        font-size: 14px;
-                    }
-                    QPushButton:hover {
-                        background-color: #e6e6e6;
-                    }
-                    QPushButton:pressed {
-                        background-color: #d9d9d9;
-                    }
-                """)
-
-                if "style" in child.attrs:
-                    button.setStyleSheet(button.styleSheet() + "\n" + child.attrs["style"])
-
-                # 🧠 NEW — apply external or inline CSS if available
-                if hasattr(self, "css_rules") and tag in self.css_rules:
-                    button.setStyleSheet(self.css_rules[tag])
-
-                def find_form(node):
-                    while node:
-                        if node.tag == "form":
-                            return node
-                        node = node.parent
-                    return None
-
-                def on_button_clicked():
-                    form_node = find_form(child)
-                    data = {}
-                    def collect_inputs(n):
-                        for c in n.children:
-                            if c.tag == "input" and "name" in c.attrs:
-                                widget = c.attrs.get("_widget")
-                                if isinstance(widget, QLineEdit):
-                                    data[c.attrs["name"]] = widget.text()
-                                else:
-                                    data[c.attrs["name"]] = c.attrs.get("value", "")
-                            collect_inputs(c)
-                    if form_node:
-                        collect_inputs(form_node)
-                        action = form_node.attrs.get("action", "")
-                        method = form_node.attrs.get("method", "get").lower()
-                        from urllib.parse import urlencode, urljoin
-                        main_window = self.window()
-                        base_url = main_window.url_bar.text().strip()
-                        action_url = urljoin(base_url if base_url.startswith(("http://","https://")) else "https://"+base_url, action or "")
-                        if method == "get":
-                            query = urlencode(data)
-                            target = f"{action_url}?{query}" if query else action_url
-                        else:
-                            target = action_url
-                        main_window.secure_navigate(target, base_url=base_url)
-                    else:
-                        print(f"[Clicked <button>: {text}] (no form found)")
-                button.clicked.connect(on_button_clicked)
-                self.page_layout.addWidget(button)
-
-            elif tag == "input":
-                input_type = child.attrs.get("type", "text").lower()
-                if input_type in ["text", "search"]:
-                    entry = QLineEdit()
-                    entry.setPlaceholderText(child.attrs.get("placeholder", ""))
-                    entry.setStyleSheet("""
-                        QLineEdit {
-                            border: 2px solid #aaa;
-                            border-radius: 4px;
-                            padding: 6px;
-                            font-size: 14px;
-                        }
-                        QLineEdit:focus {
-                            border-color: #448aff;
-                        }
-                    """)
-                    
-                    if "style" in child.attrs:
-                        button.setStyleSheet(button.styleSheet() + "\n" + child.attrs["style"])
-
-                    # 🧠 NEW — apply CSS for inputs
-                    if hasattr(self, "css_rules") and "input" in self.css_rules:
-                        entry.setStyleSheet(self.css_rules["input"])
-
-                    child.attrs["_widget"] = entry
-
-                    def find_form(node):
-                        while node:
-                            if node.tag == "form":
-                                return node
-                            node = node.parent
-                        return None
-
-                    def on_return_pressed():
-                        form_node = find_form(child)
-                        if form_node:
-                            action = form_node.attrs.get("action", "")
-                            method = form_node.attrs.get("method", "get").lower()
-                            data = {}
-                            def collect_inputs(n):
-                                for c in n.children:
-                                    if c.tag == "input" and "name" in c.attrs:
-                                        widget = c.attrs.get("_widget")
-                                        if isinstance(widget, QLineEdit):
-                                            data[c.attrs["name"]] = widget.text()
-                                        else:
-                                            data[c.attrs["name"]] = c.attrs.get("value", "")
-                                    collect_inputs(c)
-                            collect_inputs(form_node)
-                            from urllib.parse import urlencode, urljoin
-                            main_window = self.window()
-                            base_url = main_window.url_bar.text().strip()
-                            if not base_url.startswith("http"):
-                                base_url = "https://" + base_url
-                            action_url = urljoin(base_url, action or "")
-                            if method == "get":
-                                query = urlencode(data)
-                                target = f"{action_url}?{query}" if query else action_url
-                                main_window.url_bar.setText(target)
-                                main_window.goto_url()
-                            else:
-                                main_window.url_bar.setText(action_url)
-                                main_window.goto_url()
-                        else:
-                            print("[Enter pressed — no form found]")
-
-                    entry.returnPressed.connect(on_return_pressed)
-                    self.page_layout.addWidget(entry)
-
-                elif input_type in ["button", "submit"]:
-                    text = child.attrs.get("value", child.text or "Button")
-                    button = QPushButton(text)
-                    button.setStyleSheet("""
-                        QPushButton {
-                            border: 2px solid #555;
-                            border-radius: 6px;
-                            padding: 8px 16px;
-                            background-color: #f2f2f2;
-                            font-size: 14px;
-                        }
-                        QPushButton:hover {
-                            background-color: #e6e6e6;
-                        }
-                        QPushButton:pressed {
-                            background-color: #d9d9d9;
-                        }
-                    """)
-
-                    if "style" in child.attrs:
-                        button.setStyleSheet(button.styleSheet() + "\n" + child.attrs["style"])
-
-                    # 🧠 NEW — apply CSS rule if present
-                    if hasattr(self, "css_rules") and "input[type=submit]" in self.css_rules:
-                        button.setStyleSheet(self.css_rules["input[type=submit]"])
-
-                    def find_form(node):
-                        while node:
-                            if node.tag == "form":
-                                return node
-                            node = node.parent
-                        return None
-
-                    def on_button_clicked():
-                        form_node = find_form(child)
-                        data = {}
-                        def collect_inputs(n):
-                            for c in n.children:
-                                if c.tag == "input" and "name" in c.attrs:
-                                    widget = c.attrs.get("_widget")
-                                    if isinstance(widget, QLineEdit):
-                                        data[c.attrs["name"]] = widget.text()
-                                    else:
-                                        data[c.attrs["name"]] = c.attrs.get("value", "")
-                                collect_inputs(c)
-                        if form_node:
-                            collect_inputs(form_node)
-                            action = form_node.attrs.get("action", "")
-                            method = form_node.attrs.get("method", "get").lower()
-                            from urllib.parse import urlencode, urljoin
-                            main_window = self.window()
-                            base_url = main_window.url_bar.text().strip()
-                            action_url = urljoin(base_url if base_url.startswith(("http://","https://")) else "https://"+base_url, action or "")
-                            if method == "get":
-                                query = urlencode(data)
-                                target = f"{action_url}?{query}" if query else action_url
-                            else:
-                                target = action_url
-                            main_window.secure_navigate(target, base_url=base_url)
-                        else:
-                            print(f"[Clicked <input> button: {text}] — no form found")
-                    button.clicked.connect(on_button_clicked)
-                    self.page_layout.addWidget(button)
-
-            elif tag in ["h1", "h2", "h3", "h4", "h5", "h6", "p", "b", "i", "u"]:
-                label = QLabel(child.text)
-                label.setWordWrap(True)
-                font = label.font()
-
-                if tag == "h1":
-                    font.setPointSize(36)
-                    font.setBold(True)
-                elif tag == "h2":
-                    font.setPointSize(32)
-                    font.setBold(True)
-                elif tag == "h3":
-                    font.setPointSize(28)
-                    font.setBold(True)
-                elif tag == "h4":
-                    font.setPointSize(24)
-                    font.setBold(True)
-                elif tag == "h5":
-                    font.setPointSize(20)
-                    font.setBold(True)
-                elif tag == "h6":
-                    font.setPointSize(16)
-                    font.setBold(True)
-                elif tag == "b":
-                    font.setBold(True)
-                elif tag == "i":
-                    font.setItalic(True)
-                elif tag == "u":
-                    label.setText(f"<u>{child.text}</u>")
-
-                label.setFont(font)
-
-                if hasattr(self, "css_rules") and tag in self.css_rules:
-                    label.setStyleSheet(self.css_rules[tag])
-
-                self.page_layout.addWidget(label)
-
-            elif child.text:
-                lbl = QLabel(child.text)
-                lbl.setWordWrap(True)
-
-                # 🧠 Try to apply CSS from the parent tag if possible
-                applied_style = None
-                parent_tag = child.parent.tag.lower() if child.parent and child.parent.tag else None
-
-                if hasattr(self, "css_rules"):
-                    if parent_tag and parent_tag in self.css_rules:
-                        applied_style = self.css_rules[parent_tag]
-                    elif "body" in self.css_rules:
-                        applied_style = self.css_rules["body"]
-
-                if applied_style:
-                    lbl.setStyleSheet(applied_style)
-
-                self.page_layout.addWidget(lbl)
-
-            if child.children:
-                self.render_nodes(child)
-
-# ------------------------
-# Browser Tab
-# ------------------------
-class BrowserTab(QWidget):
-    def __init__(self, name="New Tab"):
-        super().__init__()
-        layout = QVBoxLayout(self)
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.browser = BrowserWidget()
-        self.scroll_area.setWidget(self.browser)
-        layout.addWidget(self.scroll_area)
-
-# ------------------------
-# Main Window
-# ------------------------
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -789,41 +15,12 @@ class MainWindow(QMainWindow):
         self.setWindowFlags(Qt.FramelessWindowHint)
         self.setMinimumSize(900, 600)
 
-        # ---- Custom Title Bar ----
+        # ---- Title Bar ----
         title_bar = QWidget()
-        title_layout = QHBoxLayout(title_bar)
-        title_layout.setContentsMargins(5, 2, 5, 2)
-        title_layout.setSpacing(10)
-
+        title_layout = QVBoxLayout(title_bar)
         title_label = QLabel("🛰 Sentinel Browser")
         title_label.setStyleSheet("font-size: 16px; font-weight: bold; color: grey;")
-
-        btn_min = QPushButton("—")
-        btn_max = QPushButton("⬜")
-        btn_close = QPushButton("✕")
-
-        for b in [btn_min, btn_max, btn_close]:
-            b.setFixedSize(30, 30)
-            b.setStyleSheet("""
-                QPushButton {
-                    color: white;
-                    background-color: #444;
-                    border: none;
-                    font-size: 14px;
-                }
-                QPushButton:hover { background-color: #666; }
-                QPushButton:pressed { background-color: #222; }
-            """)
-
-        btn_min.clicked.connect(self.showMinimized)
-        btn_max.clicked.connect(self.toggle_maximize)
-        btn_close.clicked.connect(self.close)
-
         title_layout.addWidget(title_label)
-        title_layout.addStretch()
-        title_layout.addWidget(btn_min)
-        title_layout.addWidget(btn_max)
-        title_layout.addWidget(btn_close)
 
         # ---- Navigation Toolbar ----
         navbar = QToolBar()
@@ -855,91 +52,55 @@ class MainWindow(QMainWindow):
 
         # ---- Layout ----
         main_layout = QVBoxLayout()
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
         main_layout.addWidget(title_bar)
         main_layout.addWidget(navbar)
         main_layout.addWidget(self.tabs)
-
         container = QWidget()
         container.setLayout(main_layout)
         self.setCentralWidget(container)
 
-        # ---- Threads and Tabs ----
-        self.loader_thread = None
+        # ---- Tabs ----
         self.add_new_tab("Home")
         self.add_plus_tab()
 
-        # Shortcuts
+        # ---- Shortcuts ----
         QShortcut(QKeySequence("Ctrl+T"), self).activated.connect(lambda: self.add_new_tab("New Tab"))
         QShortcut(QKeySequence("Ctrl+W"), self).activated.connect(lambda: self.close_tab(self.tabs.currentIndex()))
 
-        # ---- Title Bar Dragging ----
-        title_bar.mousePressEvent = self.mousePressEvent
-        title_bar.mouseMoveEvent = self.mouseMoveEvent
-        self.offset = None
+        self.loader_thread = None
 
-    def secure_navigate(self, target_url: str, base_url: str = ""):
-        """Centralized safe navigation with security checks."""
+    # ---------- Navigation ----------
+    def current_browser(self):
+        current_widget = self.tabs.currentWidget()
+        from browser_widget import BrowserTab
+        if isinstance(current_widget, BrowserTab):
+            return current_widget.browser
+        return None
+
+    def secure_navigate(self, target_url, base_url=""):
         from urllib.parse import urlparse, urljoin
-
         if not base_url:
             base_url = self.url_bar.text().strip()
         if not base_url.startswith("http"):
             base_url = "https://" + base_url
-
         target_url = urljoin(base_url, target_url)
         parsed_domain = urlparse(target_url).netloc
 
         # --- Security checks ---
         if is_cross_domain_submit(base_url, target_url):
-            warning_html = f"""
-            <h1>⚠️ Suspicious Form Submission</h1>
-            <p>This form tries to submit to another domain:</p>
-            <p><b>{target_url}</b></p>
-            <p>This could be phishing. Submission has been blocked.</p>
-            """
-            self.current_browser().setHtml(warning_html)
+            self.current_browser().setHtml(
+                f"<h1>⚠️ Suspicious submission</h1><p>Form tries to submit to another domain: {target_url}</p>"
+            )
             return
 
         if is_suspicious_domain(parsed_domain):
-            warning_html = f"""
-            <h1>⚠️ Suspicious Domain Detected</h1>
-            <p>The domain <b>{parsed_domain}</b> looks suspicious or fake.</p>
-            <p>This might be an imitation of a known service.</p>
-            """
-            self.current_browser().setHtml(warning_html)
+            self.current_browser().setHtml(
+                f"<h1>⚠️ Suspicious Domain</h1><p>The domain <b>{parsed_domain}</b> looks unsafe.</p>"
+            )
             return
 
-        # --- If passed checks ---
-        print(f"[Safe Navigation] {target_url}")
         self.url_bar.setText(target_url)
         self.goto_url()
-
-
-    # --- Window Dragging ---
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.offset = event.pos()
-
-    def mouseMoveEvent(self, event):
-        if self.offset is not None and event.buttons() == Qt.LeftButton:
-            self.move(self.pos() + event.pos() - self.offset)
-
-    def toggle_maximize(self):
-        if self.isMaximized():
-            self.showNormal()
-        else:
-            self.showMaximized()
-
-    # --------------------------
-    # Browser Logic
-    # --------------------------
-    def current_browser(self):
-        current_widget = self.tabs.currentWidget()
-        if isinstance(current_widget, BrowserTab):
-            return current_widget.browser
-        return None
 
     def goto_url(self, add_to_history=True):
         browser = self.current_browser()
@@ -951,27 +112,22 @@ class MainWindow(QMainWindow):
             browser.setHtml("<h1>Invalid URL</h1>")
             return
 
-        # ---- Homograph protection ----
         if not is_ascii_url(url_string):
-            browser.setHtml("<h1>⚠️ Potential homograph attack detected!</h1><p>The URL contains non-ASCII characters and may be unsafe.</p>")
+            browser.setHtml("<h1>⚠️ Homograph warning!</h1>")
             return
 
-        # ---- Domain safety check ----
         if check_safety(url_string, blocked_domains):
-            browser.setHtml("<h1>This domain is blocked as malicious!</h1>")
+            browser.setHtml("<h1>This domain is blocked.</h1>")
             return
 
-        # ---- Begin loading ----
         browser.show_loading()
         self.url_bar.setDisabled(True)
 
-        # ---- Add to history ----
         if add_to_history:
             idx = self.tabs.currentIndex()
-            if idx not in self.tab_history:
-                self.tab_history[idx] = {"urls": [], "pos": -1}
+            self.tab_history.setdefault(idx, {"urls": [], "pos": -1})
             hist = self.tab_history[idx]
-            hist["urls"] = hist["urls"][: hist["pos"] + 1]  # cut forward history
+            hist["urls"] = hist["urls"][: hist["pos"] + 1]
             hist["urls"].append(url_string)
             hist["pos"] += 1
             self.update_nav_buttons()
@@ -986,78 +142,65 @@ class MainWindow(QMainWindow):
         browser.setHtml(html)
         self.url_bar.setDisabled(False)
         self.loader_thread = None
-    
+
+    # ---------- Navigation buttons ----------
     def update_nav_buttons(self):
         idx = self.tabs.currentIndex()
-        if idx not in self.tab_history:
+        hist = self.tab_history.get(idx)
+        if not hist:
             self.back_btn.setEnabled(False)
             self.forward_btn.setEnabled(False)
             return
-        hist = self.tab_history[idx]
         self.back_btn.setEnabled(hist["pos"] > 0)
         self.forward_btn.setEnabled(hist["pos"] < len(hist["urls"]) - 1)
 
     def go_back(self):
         idx = self.tabs.currentIndex()
-        if idx not in self.tab_history:
+        hist = self.tab_history.get(idx)
+        if not hist or hist["pos"] <= 0:
             return
-        hist = self.tab_history[idx]
-        if hist["pos"] > 0:
-            hist["pos"] -= 1
-            prev_url = hist["urls"][hist["pos"]]
-            self.url_bar.setText(prev_url)
-            self.goto_url(add_to_history=False)
-        self.update_nav_buttons()
-    
+        hist["pos"] -= 1
+        self.url_bar.setText(hist["urls"][hist["pos"]])
+        self.goto_url(add_to_history=False)
+
     def go_forward(self):
         idx = self.tabs.currentIndex()
-        if idx not in self.tab_history:
+        hist = self.tab_history.get(idx)
+        if not hist or hist["pos"] >= len(hist["urls"]) - 1:
             return
-        hist = self.tab_history[idx]
-        if hist["pos"] < len(hist["urls"]) - 1:
-            hist["pos"] += 1
-            next_url = hist["urls"][hist["pos"]]
-            self.url_bar.setText(next_url)
-            self.goto_url(add_to_history=False)
-        self.update_nav_buttons()
-    
+        hist["pos"] += 1
+        self.url_bar.setText(hist["urls"][hist["pos"]])
+        self.goto_url(add_to_history=False)
+
     def reload_page(self):
-        current_url = self.url_bar.text().strip()
-        if current_url:
+        if self.url_bar.text().strip():
             self.goto_url(add_to_history=False)
 
-    # --------------------------
-    # Tabs
-    # --------------------------
+    # ---------- Tabs ----------
     def add_new_tab(self, name="New Tab", switch=True):
-        new_tab = BrowserTab(name)
-        idx = self.tabs.insertTab(self.tabs.count() - 1, new_tab, name)
+        tab = BrowserTab(name)
+        idx = self.tabs.insertTab(self.tabs.count() - 1, tab, name)
         self.tab_history[idx] = {"urls": [], "pos": -1}
         if switch:
             self.tabs.setCurrentIndex(idx)
 
-    def close_tab(self, index):
-        # Prevent closing "+" tab
-        if self.tabs.tabText(index) == "+":
-            return
-        if self.tabs.count() > 1:
-            self.tabs.removeTab(index)
-
     def add_plus_tab(self):
-        plus_widget = QWidget()
-        idx = self.tabs.addTab(plus_widget, "+")
-        # Make sure "+" tab has no close button
+        plus = QWidget()
+        idx = self.tabs.addTab(plus, "+")
         self.tabs.tabBar().setTabButton(idx, QTabBar.RightSide, None)
+
+    def close_tab(self, index):
+        if self.tabs.tabText(index) != "+" and self.tabs.count() > 1:
+            self.tabs.removeTab(index)
 
     def handle_plus_tab(self, index):
         if self.tabs.tabText(index) == "+":
-            self.add_new_tab("New Tab")
+            self.add_new_tab()
             self.tabs.setCurrentIndex(self.tabs.count() - 2)
 
-# ------------------------
-# Run App
-# ------------------------
-app = QApplication(sys.argv)
-window = MainWindow()
-window.show()
-app.exec_()
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec_())
