@@ -1,15 +1,18 @@
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QScrollArea
-from ui.browser_widget import BrowserWidget
+from ui.browser_widget import BrowserWidget, HOME_HTML
 
 class BrowserTab(QWidget):
-    def __init__(self, name="New Tab"):
+    def __init__(self, name, load_home=False):
         super().__init__()
+
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
+        if load_home:
+            self.browser = BrowserWidget(HOME_HTML)
+            self.browser.current_url = ""
+        else:
+            self.browser = BrowserWidget("")  # empty tab
+            self.browser.current_url = ""
 
-        self.browser = BrowserWidget()
-        self.scroll_area.setWidget(self.browser)
-
-        layout.addWidget(self.scroll_area)
+        layout.addWidget(self.browser)

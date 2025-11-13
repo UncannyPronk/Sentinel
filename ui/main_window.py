@@ -92,7 +92,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(container)
 
         self.loader_thread = None
-        self.add_new_tab("Home")
+        self.add_new_tab("Home", homepage=True)
         self.add_plus_tab()
 
         QShortcut(QKeySequence("Ctrl+T"), self).activated.connect(lambda: self.add_new_tab("New Tab"))
@@ -265,18 +265,36 @@ class MainWindow(QMainWindow):
         if current_url:
             self.goto_url(add_to_history=False)
 
-    def add_new_tab(self, name="New Tab", switch=True):
-        new_tab = BrowserTab(name)
+    def add_new_tab(self, name="New Tab", switch=True, homepage=False):
+        if homepage:
+            new_tab = BrowserTab(name, load_home=True)
+        else:
+            new_tab = BrowserTab(name, load_home=False)
+
         idx = self.tabs.insertTab(self.tabs.count() - 1, new_tab, name)
         self.tab_history[idx] = {"urls": [], "pos": -1}
+
         if switch:
             self.tabs.setCurrentIndex(idx)
 
     def close_tab(self, index):
         if self.tabs.tabText(index) == "+":
             return
-        if self.tabs.count() > 1:
-            self.tabs.removeTab(index)
+
+        real_tabs = self.tabs.count() - 1   # minus the "+" tab
+
+        # If it's the last tab, close browser
+        if real_tabs <= 1:
+            self.close()
+            return
+
+        # Remove the tab
+        self.tabs.removeTab(index)
+
+        # After removing, if the "+" tab becomes selected, move to previous tab
+        current = self.tabs.currentIndex()
+        if self.tabs.tabText(current) == "+":
+            self.tabs.setCurrentIndex(current - 1)
 
     def add_plus_tab(self):
         plus_widget = QWidget()
