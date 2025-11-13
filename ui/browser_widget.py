@@ -5,6 +5,8 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap
 from core.html_parser import TreeHTMLParser
 from core.security import is_suspicious_domain
+from ui.download_manager import download_file
+from core.malware_scanner import is_malicious_file
 from bs4 import BeautifulSoup
 
 HOME_HTML = """
@@ -153,6 +155,15 @@ class BrowserWidget(QWidget):
             w = item.widget()
             if w:
                 w.deleteLater()
+
+    def is_mixed_content(self, resource_url):
+        page_url = ""
+        try:
+            page_url = self.window().url_bar.text().strip()
+        except:
+            pass
+
+        return page_url.startswith("https://") and resource_url.startswith("http://")
 
     # ================= IMAGE URL HELPERS =================
     def resolve_image_url(self, base_url, src):
@@ -333,6 +344,13 @@ class BrowserWidget(QWidget):
             print(f"[IMG] resolved: {resolved}")
             print(f"[IMG] final: {final_url}")
 
+            if self.is_mixed_content(final_url):
+                print("[MixedContent] Blocked insecure image:", final_url)
+                warn = QLabel(f"[Blocked insecure image: {final_url}]")
+                warn.setStyleSheet("color: orange; font-size: 12px;")
+                self.page_layout.addWidget(warn)
+                return
+
             try:
                 r = requests.get(final_url, timeout=7)
                 if r.status_code == 200:
@@ -459,6 +477,39 @@ class BrowserWidget(QWidget):
                 base_url = main_window.url_bar.text().strip()
 
                 resolved = urljoin(base_url, href)
+
+                FILE_EXTS = [".pdf", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".txt",
+             ".csv", ".json", ".xml", ".apk", ".exe", ".bat", ".cmd",
+             ".sh", ".js", ".jar", ".msi", ".scr"]
+
+                if any(resolved.lower().endswith(ext) for ext in FILE_EXTS):
+                    print("[Download] Detected file download:", resolved)
+
+                    result, reason = is_malicious_file(resolved)
+
+                    if result:
+                        print("[MalwareBlock] Suspicious file:", resolved)
+
+                        warning_html = f"""
+                        <h1>⚠️ File Blocked</h1>
+                        <p><b>{resolved}</b></p>
+                        <p>This file was blocked because:</p>
+                        <p><b>{reason}</b></p>
+                        """
+                        self.page_layout.addWidget(QLabel(warning_html))
+                        return
+
+                    download_file(resolved, parent=self)
+                    return
+                            
+                if self.is_mixed_content(resolved):
+                    print("[MixedContent] Blocked insecure navigation:", resolved)
+                    main_window.current_browser().setHtml("""
+                        <h1>⚠️ Mixed Content Blocked</h1>
+                        <p>This HTTPS page attempted to load an insecure HTTP link.</p>
+                        <p>Sentinel blocked this to keep your browsing secure.</p>
+                    """)
+                    return
 
                 if "duckduckgo.com/l/" in resolved:
                     try:
@@ -650,6 +701,15 @@ class BrowserWidget(QWidget):
         action_url = urljoin(base_url, action or "")
 
         print(f"[Form] Submitting to: {action_url} ({method.upper()}) with data={data}")
+        
+        if self.is_mixed_content(action_url):
+            print("[MixedContent] Blocked form submission:", action_url)
+            main_window.current_browser().setHtml("""
+                <h1>⚠️ Blocked Mixed-Content Form</h1>
+                <p>HTTPS form attempted to submit to insecure HTTP URL.</p>
+                <p>Submission blocked for safety.</p>
+            """)
+            return
 
         # ----------------------------------------------------------
         # DuckDuckGo Lite ignores POST and ALWAYS expects GET query.

@@ -8,8 +8,10 @@ from core.security import (
     is_cross_domain_submit, is_suspicious_domain
 )
 from core.page_loader import PageLoader
+from core.utils import is_local_file
 from ui.browser_tab import BrowserTab
 import html as html_lib
+import re
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -113,7 +115,7 @@ class MainWindow(QMainWindow):
         target_url = urljoin(base_url, target_url)
         parsed_domain = urlparse(target_url).netloc
 
-        if is_cross_domain_submit(base_url, target_url):
+        if not is_local_file(target_url) and is_cross_domain_submit(base_url, target_url):
             warning_html = f"""
                 <h1>⚠️ Suspicious Form Submission</h1>
                 <p>This form tries to submit to another domain:</p>
@@ -123,7 +125,7 @@ class MainWindow(QMainWindow):
             self.current_browser().setHtml(warning_html)
             return
 
-        if is_suspicious_domain(parsed_domain):
+        if not is_local_file(url_string) and is_suspicious_domain(parsed_domain):
             warning_html = f"""
                 <h1>⚠️ Suspicious Domain Detected</h1>
                 <p>The domain <b>{parsed_domain}</b> looks suspicious or fake.</p>
@@ -179,6 +181,10 @@ class MainWindow(QMainWindow):
         if not url_string:
             browser.setHtml("<h1>Invalid URL</h1>")
             return
+        
+        if is_local_file(url_string):
+            self.load_page(url_string)
+            return
 
         if not is_ascii_url(url_string):
             browser.setHtml("<h1>⚠️ Potential homograph attack detected!</h1><p>The URL contains non-ASCII characters and may be unsafe.</p>")
@@ -207,12 +213,18 @@ class MainWindow(QMainWindow):
         self.loader_thread.start()
 
     def display_page(self, browser, result):
-        html, title = result
-        browser.current_url = self.url_bar.text().strip()
+        if isinstance(result, str):
+            title = "Error"
+            html = f"<h1>Error Loading Page</h1><p>{result}</p>"
+        else:
+            html, title = result
 
         if not title:
-            title_match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
-            title = title_match.group(1).strip() if title_match else "Untitled"
+            match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+            if match:
+                title = match.group(1).strip()
+            else:
+                title = "Untitled"
 
         if len(title) > 60:
             title = title[:60] + "…"
@@ -220,7 +232,9 @@ class MainWindow(QMainWindow):
         idx = self.tabs.currentIndex()
         self.tabs.setTabText(idx, title)
 
-        browser.base_url = self.url_bar.text().strip()
+        browser.current_url = self.url_bar.text().strip()
+        browser.base_url = browser.current_url
+
         browser.setHtml(html)
         self.url_bar.setDisabled(False)
 

@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<body>
+<h1>Download Tests</h1>
+
+<h2>Safe Files</h2>
+<a href="https://httpbin.org/image/png">Download PNG</a><br>
+<a href="https://httpbin.org/bytes/1000">Random Bytes</a><br>
+
+<h2>Blocked Executables</h2>
+<a href="https://example.com/malware.exe">Blocked .exe</a><br>
+<a href="https://example.com/run.sh">Blocked .sh</a><br>
+
+<h2>Content-Disposition</h2>
+<a href="https://httpbin.org/response-headers?Content-Disposition=attachment;filename=testfile.txt">
+    Download via Content-Disposition
+</a>
+
+</body>
+</html>

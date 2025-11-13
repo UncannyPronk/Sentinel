@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<body>
+<h1>Advanced Form Tests</h1>
+
+<h2>GET Search</h2>
+<form action="https://duckduckgo.com/lite/">
+    <input type="text" name="q" placeholder="Search...">
+    <button>Search</button>
+</form>
+
+<h2>POST Form</h2>
+<form action="https://httpbin.org/post" method="post">
+    <input type="text" name="username" value="test">
+    <input type="text" name="id" value="123">
+    <button>Submit POST</button>
+</form>
+
+<h2>Hidden Inputs</h2>
+<form action="https://httpbin.org/get">
+    <input type="hidden" name="token" value="abc123">
+    <input type="text" name="visible" placeholder="Visible input">
+    <button>Submit</button>
+</form>
+
+</body>
+</html>

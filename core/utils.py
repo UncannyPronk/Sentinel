@@ -26,6 +26,8 @@ def remove_ads_from_html(html):
     )
     return html
 
+def is_local_file(url: str):
+    return url.endswith(".html") or url.startswith("file://")
 
 def sanitize_url(url):
     url = url.strip()

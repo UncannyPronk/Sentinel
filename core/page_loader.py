@@ -1,5 +1,6 @@
 from PyQt5.QtCore import QThread, pyqtSignal
 import requests, re
+from requests.exceptions import SSLError
 from .utils import remove_ads_from_html
 
 
@@ -33,23 +34,36 @@ class PageLoader(QThread):
                 "Accept-Language": "en-US,en;q=0.9",
             }
 
-            session = requests.Session()
+            try:
+                session = requests.Session()
 
-            if self.method == "POST":
-                response = session.post(
-                    self.url,
-                    data=self.data,
-                    headers=headers,
-                    timeout=10,
-                    allow_redirects=True,
-                )
-            else:
-                response = session.get(
-                    self.url,
-                    headers=headers,
-                    timeout=10,
-                    allow_redirects=True,
-                )
+                if self.method == "POST":
+                    response = session.post(
+                        self.url,
+                        data=self.data,
+                        headers=headers,
+                        timeout=10,
+                        verify=True,      
+                        allow_redirects=True,
+                    )
+                else:
+                    response = session.get(
+                        self.url,
+                        headers=headers,
+                        timeout=10,
+                        verify=True,      
+                        allow_redirects=True,
+                    )
+            except SSLError:
+                self.error.emit("""
+                    <h1>🔒 TLS Certificate Error</h1>
+                    <p>The SSL certificate for this site is invalid or cannot be verified.</p>
+                    <p>Connection blocked for your safety.</p>
+                """)
+                return
+            except Exception as e:
+                self.error.emit(f"<h1>Connection Error</h1><p>{e}</p>")
+                return
 
             if not (200 <= response.status_code < 400):
                 self.error.emit(f"<h1>Error {response.status_code}</h1>")
