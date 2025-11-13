@@ -35,7 +35,6 @@ class PageLoader(QThread):
 
             session = requests.Session()
 
-            # Follow redirects manually (to catch non-200 intermediate results)
             if self.method == "POST":
                 response = session.post(
                     self.url,
@@ -58,11 +57,9 @@ class PageLoader(QThread):
             
             raw_html = response.text
 
-            # Extract title BEFORE cleaning
             title_match = re.search(r"<title>(.*?)</title>", raw_html, re.IGNORECASE | re.DOTALL)
             self.page_title = title_match.group(1).strip() if title_match else None
 
-            # Clean page
             html = self.clean_html(raw_html)
 
             print("[PageLoader] len(html) after clean:", len(html))

@@ -125,30 +125,25 @@ class BrowserWidget(QWidget):
     def __init__(self, html=HOME_HTML):
         super().__init__()
 
-        # --- Container for webpage content ---
         self.container = QWidget()
         self.page_layout = QVBoxLayout(self.container)
         self.page_layout.setAlignment(Qt.AlignTop)
         self.page_layout.setSpacing(10)
         self.page_layout.setContentsMargins(20, 20, 20, 20)
 
-        # --- Scrollable area ---
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setWidget(self.container)
 
-        # --- Outer layout ---
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.addWidget(self.scroll)
 
-        # --- Data storage ---
         self.root_node = None
         self.inline_css = []
         self.linked_css = []
         self.css_rules = {}
 
-        # --- Load default HTML ---
         self.setHtml(html)
 
     # ------------------- Utility -------------------
@@ -191,9 +186,8 @@ class BrowserWidget(QWidget):
     def fix_wikipedia_static_url(self, img_url, src, base_url):
         """Wikipedia-specific fallback for static files."""
         if "wikipedia.org" not in base_url:
-            return img_url  # Do not modify for other sites
+            return img_url
 
-        # Wikipedia stores all static assets on en.wikipedia.org
         if src.startswith("/static/"):
             if "m.wikipedia.org" in base_url:
                 return "https://en.m.wikipedia.org" + src
@@ -262,28 +256,24 @@ class BrowserWidget(QWidget):
             page_title = title_match.group(1).strip() if title_match else ""
 
             if page_title:
-                # Set tab text (MainWindow method)
                 main_window = self.window()
                 if hasattr(main_window, "set_tab_title"):
                     main_window.set_tab_title(self, page_title)
         except Exception as e:
             print(f"[TitleError] Could not extract title: {e}")
 
-        # Base URL for resolving relative CSS links
         base_url = ""
         if hasattr(self.window(), "url_bar"):
             base_url = self.window().url_bar.text().strip()
         if not base_url.startswith("http"):
             base_url = "https://" + base_url
 
-        # ✅ Load CSS before parsing HTML
         self.css_rules = self.load_external_css(html, base_url)
 
         parser = TreeHTMLParser()
         parser.feed(html)
         self.root_node = parser.root
 
-        # Apply background color if CSS says so
         if "body" in self.css_rules:
             match = re.search(r'background-color\s*:\s*([^;]+);?', self.css_rules["body"], re.IGNORECASE)
             if match:
@@ -291,7 +281,6 @@ class BrowserWidget(QWidget):
                 self.container.setStyleSheet(f"background-color: {bg_color};")
                 print(f"[Detected background color: {bg_color}]")
 
-        # Render the HTML elements
         self.render_nodes(self.root_node)
 
     # ------------------- Loading State -------------------
@@ -331,14 +320,11 @@ class BrowserWidget(QWidget):
             main_window = self.window()
             base_url = getattr(main_window, "url_bar").text().strip()
 
-            # Normalize base_url
             if base_url and not base_url.startswith(("http://", "https://")):
                 base_url = "https://" + base_url
 
-            # Resolve relative → absolute
             resolved = urljoin(base_url, src)
 
-            # Fix known patterns (httpcats, wikipedia, etc)
             final_url = self.resolve_image_url(base_url, resolved)
             final_url = self.fix_wikipedia_static_url(final_url, src, base_url)
 
@@ -347,7 +333,6 @@ class BrowserWidget(QWidget):
             print(f"[IMG] resolved: {resolved}")
             print(f"[IMG] final: {final_url}")
 
-            # Load the image
             try:
                 r = requests.get(final_url, timeout=7)
                 if r.status_code == 200:
@@ -357,17 +342,13 @@ class BrowserWidget(QWidget):
 
                     img_label = QLabel()
 
-                    # Set natural pixmap first
                     img_label.setPixmap(pix)
 
-                    # KEEP aspect ratio
                     img_label.setScaledContents(False)
 
-                    # Auto-resize QLabel to image's natural size
                     img_label.adjustSize()
 
-                    # Optional: limit huge images (prevent breaking layout)
-                    max_width = 600  # you can tune this
+                    max_width = 600 
                     if pix.width() > max_width:
                         scaled = pix.scaledToWidth(max_width, Qt.SmoothTransformation)
                         img_label.setPixmap(scaled)
@@ -468,7 +449,6 @@ class BrowserWidget(QWidget):
             text = child.text or child.attrs.get("href", "")
             href = child.attrs.get("href", "")
 
-            # Render as clickable anchor
             link = QLabel(f"<a href='#'>{text}</a>")
             link.setTextInteractionFlags(Qt.TextBrowserInteraction)
             link.setOpenExternalLinks(False)
@@ -478,12 +458,8 @@ class BrowserWidget(QWidget):
                 main_window = self.window()
                 base_url = main_window.url_bar.text().strip()
 
-                # Resolve relative → absolute normally
                 resolved = urljoin(base_url, href)
 
-                # -----------------------------------------
-                # 🦆 DuckDuckGo Lite redirect cleanup
-                # -----------------------------------------
                 if "duckduckgo.com/l/" in resolved:
                     try:
                         qs = parse_qs(urlparse(resolved).query)
@@ -494,7 +470,6 @@ class BrowserWidget(QWidget):
                     except Exception as e:
                         print(f"[DDG] Failed to extract uddg: {e}")
 
-                # Navigate safely
                 main_window.url_bar.setText(resolved)
                 main_window.goto_url()
 
@@ -506,26 +481,22 @@ class BrowserWidget(QWidget):
 
         # ---------------- LISTS (<ul>, <ol>, <li>) ----------------
         if tag in ["ul", "ol"]:
-            # Create a container widget for the list
             list_container = QWidget()
             list_layout = QVBoxLayout(list_container)
             list_layout.setContentsMargins(10, 5, 5, 5)
             list_layout.setSpacing(2)
 
-            # Store type so <li> can know whether to show bullets or numbers
             child.attrs["_list_type"] = tag
 
             self.apply_css(list_container, tag, child)
             self.page_layout.addWidget(list_container)
 
-            # Render list children inside this container
             for li in child.children:
                 self.safe_render(self._render_list_item, li, child, list_layout)
 
             return
 
         if tag == "li":
-            # Should not render standalone li outside list
             return
 
         # ---------------- TEXT ELEMENTS ----------------
@@ -561,16 +532,13 @@ class BrowserWidget(QWidget):
 
         text = li_node.text.strip() if li_node.text else ""
 
-        # Determine bullet style
         list_type = parent_list_node.attrs.get("_list_type", "ul")
         if list_type == "ul":
             bullet = "•"
-        else:  # ordered list
-            # Count current index by how many widgets are already inside
+        else:
             index = list_layout.count() + 1
             bullet = f"{index}."
 
-        # Create label like: "• item" or "1. item"
         lbl = QLabel(f"{bullet} {text}")
         lbl.setWordWrap(True)
         lbl.setStyleSheet("padding-left: 10px;")
@@ -578,7 +546,6 @@ class BrowserWidget(QWidget):
         self.apply_css(lbl, "li", li_node)
         list_layout.addWidget(lbl)
 
-        # If the <li> has nested children (like nested lists), render them
         for child in li_node.children:
             self.safe_render(self._render_single_node, child)
 
@@ -590,10 +557,8 @@ class BrowserWidget(QWidget):
             return
 
         for child in node.children:
-            # Render this node safely
             self.safe_render(self._render_single_node, child)
 
-            # Recurse safely
             if child.children:
                 self.safe_render(self.render_nodes, child, depth + 1)
 
@@ -607,7 +572,6 @@ class BrowserWidget(QWidget):
             "outline", "outline-color", "outline-width",
         ]
 
-        # 🚫 Never hide input/button elements accidentally
         if "display:none" in css_block.replace(" ", "").lower():
             print("[RenderFallback] Ignored 'display:none' to keep form controls visible.")
             return ""
@@ -632,7 +596,6 @@ class BrowserWidget(QWidget):
         if not hasattr(self, "css_rules"):
             return
 
-        # ✅ Force visibility for key form widgets (so they're never hidden)
         widget.setVisible(True)
 
         for selector, style in self.css_rules.items():
@@ -689,7 +652,6 @@ class BrowserWidget(QWidget):
         print(f"[Form] Submitting to: {action_url} ({method.upper()}) with data={data}")
 
         # ----------------------------------------------------------
-        # 🦆 DUCKDUCKGO LITE FIX → FORCE GET
         # DuckDuckGo Lite ignores POST and ALWAYS expects GET query.
         # ----------------------------------------------------------
         if "duckduckgo.com/lite" in action_url:
@@ -708,7 +670,6 @@ class BrowserWidget(QWidget):
         print(f"[Form] POST → handing off to loader: {action_url}")
 
         try:
-            # Let MainWindow handle POST requests
             main_window.load_page(action_url, method="POST", data=data)
         except Exception as e:
             print(f"[Form] Failed POST: {e}")

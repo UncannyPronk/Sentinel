@@ -32,13 +32,11 @@ class TreeHTMLParser(HTMLParser):
         else:
             self.root.children.append(node)
 
-        # ✅ Self-closing tags (like <input>, <img>, etc.)
         if tag not in self.SELF_CLOSING_TAGS:
             self.stack.append(node)
 
     def handle_endtag(self, tag):
         tag = tag.lower()
-        # Pop until we find the matching tag
         while self.stack:
             node = self.stack.pop()
             if node.tag == tag:
@@ -51,5 +49,4 @@ class TreeHTMLParser(HTMLParser):
         if self.stack:
             self.stack[-1].text += data + "\n"
         else:
-            # Orphan text directly under root
             self.root.children.append(Node(tag="text", text=data))

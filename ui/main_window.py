@@ -210,7 +210,6 @@ class MainWindow(QMainWindow):
         html, title = result
         browser.current_url = self.url_bar.text().strip()
 
-        # fallback to parsing cleaned HTML
         if not title:
             title_match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
             title = title_match.group(1).strip() if title_match else "Untitled"
@@ -218,7 +217,6 @@ class MainWindow(QMainWindow):
         if len(title) > 60:
             title = title[:60] + "…"
 
-        # Update tab name
         idx = self.tabs.currentIndex()
         self.tabs.setTabText(idx, title)
 
@@ -281,17 +279,14 @@ class MainWindow(QMainWindow):
         if self.tabs.tabText(index) == "+":
             return
 
-        real_tabs = self.tabs.count() - 1   # minus the "+" tab
+        real_tabs = self.tabs.count() - 1  
 
-        # If it's the last tab, close browser
         if real_tabs <= 1:
             self.close()
             return
 
-        # Remove the tab
         self.tabs.removeTab(index)
 
-        # After removing, if the "+" tab becomes selected, move to previous tab
         current = self.tabs.currentIndex()
         if self.tabs.tabText(current) == "+":
             self.tabs.setCurrentIndex(current - 1)
@@ -309,11 +304,9 @@ class MainWindow(QMainWindow):
     def on_tab_changed(self, index):
         browser = self.current_browser()
 
-        # Case 1: No browser (e.g., plus-tab)
         if not browser:
             self.url_bar.setText("")
             return
 
-        # Case 2: Browser exists → restore last known URL for that tab
         url = getattr(browser, "current_url", "")
         self.url_bar.setText(url)

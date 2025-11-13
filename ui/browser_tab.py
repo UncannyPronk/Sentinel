@@ -12,7 +12,7 @@ class BrowserTab(QWidget):
             self.browser = BrowserWidget(HOME_HTML)
             self.browser.current_url = ""
         else:
-            self.browser = BrowserWidget("")  # empty tab
+            self.browser = BrowserWidget("") 
             self.browser.current_url = ""
 
         layout.addWidget(self.browser)

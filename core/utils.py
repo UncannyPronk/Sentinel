@@ -32,16 +32,13 @@ def sanitize_url(url):
     if not url:
         return None
 
-    # If user types something like "google.com" or "example.org"
     if "." in url and " " not in url:
-        # Add scheme if missing
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
         parsed = urlparse(url)
         if parsed.netloc:
             return url
 
-    # Otherwise, treat as search query
     search_query = ""
     for i in url:
         if i == " ":
