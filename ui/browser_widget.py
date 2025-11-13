@@ -1,10 +1,11 @@
 import re, requests
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QScrollArea, QLabel, QPushButton, QLineEdit
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QPixmap
 from core.html_parser import TreeHTMLParser
+from core.security import is_suspicious_domain
 from bs4 import BeautifulSoup
-
 
 class BrowserWidget(QWidget):
     def __init__(self, html="<h1>Welcome to Sentinel Browser Engine</h1>"):
@@ -43,6 +44,49 @@ class BrowserWidget(QWidget):
             w = item.widget()
             if w:
                 w.deleteLater()
+
+    # ================= IMAGE URL HELPERS =================
+    def resolve_image_url(self, base_url, src):
+        """Universal image URL resolver (standard-compliant)."""
+        from urllib.parse import urljoin
+
+        src = src.strip()
+
+        # Data URL
+        if src.startswith("data:"):
+            return src
+
+        # Absolute URL
+        if src.startswith("http://") or src.startswith("https://"):
+            return src
+
+        # Protocol-relative
+        if src.startswith("//"):
+            return "https:" + src
+
+        # Absolute path
+        if src.startswith("/"):
+            return urljoin(base_url, src)
+
+        # Relative path
+        if not base_url.endswith("/"):
+            base_url = base_url + "/"
+
+        return urljoin(base_url, src)
+
+    def fix_wikipedia_static_url(self, img_url, src, base_url):
+        """Wikipedia-specific fallback for static files."""
+        if "wikipedia.org" not in base_url:
+            return img_url  # Do not modify for other sites
+
+        # Wikipedia stores all static assets on en.wikipedia.org
+        if src.startswith("/static/"):
+            if "m.wikipedia.org" in base_url:
+                return "https://en.m.wikipedia.org" + src
+            else:
+                return "https://en.wikipedia.org" + src
+
+        return img_url
 
     # ------------------- CSS Helpers -------------------
     def parse_css_rules(self, css_text):
@@ -150,6 +194,67 @@ class BrowserWidget(QWidget):
         if tag in ["style", "head", "textarea"]:
             return
 
+        # ---------------- IMAGE (<img>) ----------------
+        if tag == "img":
+            src = child.attrs.get("src", "").strip()
+            alt = child.attrs.get("alt", "")
+
+            if not src:
+                return
+
+            main_window = self.window()
+            base_url = getattr(main_window, "url_bar").text().strip()
+
+            # Normalize base_url
+            if base_url and not base_url.startswith(("http://", "https://")):
+                base_url = "https://" + base_url
+
+            # Resolve relative → absolute
+            resolved = urljoin(base_url, src)
+
+            # Fix known patterns (httpcats, wikipedia, etc)
+            final_url = self.resolve_image_url(base_url, resolved)
+            final_url = self.fix_wikipedia_static_url(final_url, src, base_url)
+
+            print(f"[IMG] raw: {src}")
+            print(f"[IMG] base: {base_url}")
+            print(f"[IMG] resolved: {resolved}")
+            print(f"[IMG] final: {final_url}")
+
+            # Load the image
+            try:
+                r = requests.get(final_url, timeout=7)
+                if r.status_code == 200:
+                    from PyQt5.QtGui import QPixmap
+                    pix = QPixmap()
+                    pix.loadFromData(r.content)
+
+                    img_label = QLabel()
+
+                    # Set natural pixmap first
+                    img_label.setPixmap(pix)
+
+                    # KEEP aspect ratio
+                    img_label.setScaledContents(False)
+
+                    # Auto-resize QLabel to image's natural size
+                    img_label.adjustSize()
+
+                    # Optional: limit huge images (prevent breaking layout)
+                    max_width = 600  # you can tune this
+                    if pix.width() > max_width:
+                        scaled = pix.scaledToWidth(max_width, Qt.SmoothTransformation)
+                        img_label.setPixmap(scaled)
+
+                    img_label.setStyleSheet("margin: 8px;")
+                    self.page_layout.addWidget(img_label)
+                else:
+                    print(f"[IMG] Failed: status {r.status_code}")
+            except Exception as e:
+                print(f"[IMG] Error loading image: {e}")
+
+            return
+
         # ---------------- BUTTON ----------------
         if tag == "button":
             text = child.text or child.attrs.get("value", "Button")
@@ -231,6 +336,53 @@ class BrowserWidget(QWidget):
 
                 entry.returnPressed.connect(on_return_pressed)
                 return
+
+        # ---------------- LINK (<a>) ----------------
+        if tag == "a":
+            text = child.text or child.attrs.get("href", "")
+            href = child.attrs.get("href", "")
+
+            # Render as clickable anchor
+            link = QLabel(f"<a href='#'>{text}</a>")
+            link.setTextInteractionFlags(Qt.TextBrowserInteraction)
+            link.setOpenExternalLinks(False)
+            link.setStyleSheet("color: #0066cc; text-decoration: underline;")
+
+            def on_click():
+                main_window = self.window()
+
+                # raw text from URL bar
+                raw_url = main_window.url_bar.text().strip()
+
+                # --- Normalize base URL ---
+                # Add https:// if missing
+                if not raw_url.startswith(("http://", "https://")):
+                    raw_url = "https://" + raw_url
+
+                # Ensure it has a trailing slash when needed
+                parsed = urlparse(raw_url)
+                if parsed.path == "" or not parsed.path.endswith("/"):
+                    # Add slash only if it's a domain root or non-file path
+                    if "." not in parsed.path.split("/")[-1]:
+                        raw_url = raw_url + "/"
+
+                # --- Join URLs correctly ---
+                safe_url = urljoin(raw_url, href)
+
+                # print("RAW:", main_window.url_bar.text())
+                # print("NORMALIZED:", raw_url)
+                # print("HREF:", href)
+                # print("RESOLVED:", safe_url)
+
+                # navigate
+                main_window.url_bar.setText(safe_url)
+                main_window.goto_url()
+
+            link.mousePressEvent = lambda e: on_click()
+
+            self.apply_css(link, tag, child)
+            self.page_layout.addWidget(link)
+            return
 
         # ---------------- TEXT ELEMENTS ----------------
         if tag in ["h1", "h2", "h3", "h4", "h5", "h6", "p", "b", "i", "u"]:
