@@ -77,6 +77,7 @@ class MainWindow(QMainWindow):
         self.tabs.setTabsClosable(True)
         self.tabs.tabCloseRequested.connect(self.close_tab)
         self.tabs.tabBarClicked.connect(self.handle_plus_tab)
+        self.tabs.currentChanged.connect(self.on_tab_changed)
         self.tab_history = {}
 
         main_layout = QVBoxLayout()
@@ -207,6 +208,7 @@ class MainWindow(QMainWindow):
 
     def display_page(self, browser, result):
         html, title = result
+        browser.current_url = self.url_bar.text().strip()
 
         # fallback to parsing cleaned HTML
         if not title:
@@ -285,3 +287,15 @@ class MainWindow(QMainWindow):
         if self.tabs.tabText(index) == "+":
             self.add_new_tab("New Tab")
             self.tabs.setCurrentIndex(self.tabs.count() - 2)
+
+    def on_tab_changed(self, index):
+        browser = self.current_browser()
+
+        # Case 1: No browser (e.g., plus-tab)
+        if not browser:
+            self.url_bar.setText("")
+            return
+
+        # Case 2: Browser exists → restore last known URL for that tab
+        url = getattr(browser, "current_url", "")
+        self.url_bar.setText(url)
