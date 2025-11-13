@@ -31,9 +31,22 @@ def sanitize_url(url):
     url = url.strip()
     if not url:
         return None
-    if not url.startswith("http"):
-        url = "https://" + url
-    parsed = urlparse(url)
-    if not parsed.netloc:
-        return None
-    return url
+
+    # If user types something like "google.com" or "example.org"
+    if "." in url and " " not in url:
+        # Add scheme if missing
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+        parsed = urlparse(url)
+        if parsed.netloc:
+            return url
+
+    # Otherwise, treat as search query
+    search_query = ""
+    for i in url:
+        if i == " ":
+            search_query += "+"
+        else:
+            search_query += i
+    print(search_query)
+    return f"https://duckduckgo.com/lite/?q={search_query}&ia=web"

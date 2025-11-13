@@ -132,7 +132,21 @@ class MainWindow(QMainWindow):
 
         print(f"[Safe Navigation] {target_url}")
         self.url_bar.setText(target_url)
-        self.goto_url()
+        self.load_page(target_url, method="GET")
+
+    def load_page(self, url, method="GET", data=None):
+        """Unified loader for GET and POST so forms work properly."""
+        browser = self.current_browser()
+        if not browser:
+            return
+
+        browser.show_loading()
+        self.url_bar.setDisabled(True)
+
+        self.loader_thread = PageLoader(url, method=method, data=data)
+        self.loader_thread.finished.connect(lambda html: self.display_page(browser, html))
+        self.loader_thread.error.connect(lambda err: self.display_page(browser, err))
+        self.loader_thread.start()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
