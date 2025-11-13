@@ -9,6 +9,7 @@ from core.security import (
 )
 from core.page_loader import PageLoader
 from ui.browser_tab import BrowserTab
+import html as html_lib
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -144,7 +145,7 @@ class MainWindow(QMainWindow):
         self.url_bar.setDisabled(True)
 
         self.loader_thread = PageLoader(url, method=method, data=data)
-        self.loader_thread.finished.connect(lambda html: self.display_page(browser, html))
+        self.loader_thread.finished.connect(lambda result: self.display_page(browser, result))
         self.loader_thread.error.connect(lambda err: self.display_page(browser, err))
         self.loader_thread.start()
 
@@ -200,15 +201,28 @@ class MainWindow(QMainWindow):
             self.update_nav_buttons()
 
         self.loader_thread = PageLoader(url_string)
-        self.loader_thread.finished.connect(lambda html: self.display_page(browser, html))
+        self.loader_thread.finished.connect(lambda result: self.display_page(browser, result))
         self.loader_thread.error.connect(lambda err: self.display_page(browser, err))
         self.loader_thread.start()
 
-    def display_page(self, browser, html):
+    def display_page(self, browser, result):
+        html, title = result
+
+        # fallback to parsing cleaned HTML
+        if not title:
+            title_match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+            title = title_match.group(1).strip() if title_match else "Untitled"
+
+        if len(title) > 60:
+            title = title[:60] + "…"
+
+        # Update tab name
+        idx = self.tabs.currentIndex()
+        self.tabs.setTabText(idx, title)
+
         browser.base_url = self.url_bar.text().strip()
         browser.setHtml(html)
         self.url_bar.setDisabled(False)
-        self.loader_thread = None
 
     def update_nav_buttons(self):
         idx = self.tabs.currentIndex()

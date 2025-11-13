@@ -7,8 +7,122 @@ from core.html_parser import TreeHTMLParser
 from core.security import is_suspicious_domain
 from bs4 import BeautifulSoup
 
+HOME_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Sentinel Browser</title>
+
+    <style>
+        body {
+            background: #0d1117;
+            color: #c9d1d9;
+            font-family: 'Segoe UI', sans-serif;
+            padding: 40px;
+        }
+        h1 {
+            font-size: 36px;
+            color: #58a6ff;
+            margin-bottom: 10px;
+        }
+        .tagline {
+            font-size: 18px;
+            color: #8b949e;
+            margin-bottom: 30px;
+        }
+        .section {
+            background: #161b22;
+            border: 1px solid #30363d;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 10px;
+        }
+        .section h2 {
+            color: #79c0ff;
+            margin-bottom: 10px;
+        }
+        ul {
+            line-height: 1.8;
+        }
+        .credit {
+            margin-top: 25px;
+            text-align: center;
+            font-size: 14px;
+            color: #6e7681;
+        }
+        a {
+            color: #58a6ff;
+            text-decoration: underline;
+        }
+    </style>
+
+    <script>
+        // Your browser strips this script, but leaving it here is fine.
+        console.log("Sentinel Browser - JS blocked for security.");
+    </script>
+</head>
+
+<body>
+
+<h1>🛰 Sentinel Browser</h1>
+<div class="tagline">A Secure, Minimal, Open-Source, JavaScript-Free Browser Engine</div>
+
+<div class="section">
+    <h2>🔐 Security Focused</h2>
+    <ol>
+        <li>Blocks JavaScript by design</li>
+        <li>Homograph / IDN protection</li>
+        <li>Cross-domain form-submission detection</li>
+        <li>Suspicious domain filtering</li>
+        <li>Ad & malware blocklist integration</li>
+    </ol>
+</div>
+
+<div class="section">
+    <h2>📝 Rendering Features</h2>
+    <ul>
+        <li>Custom HTML → PyQt widget engine</li>
+        <li>Images with aspect-ratio fixing</li>
+        <li>Hyperlinks with safe sanitization</li>
+        <li>Forms: GET + POST (JS-free)</li>
+        <li>Fallback CSS: colors, borders, spacing</li>
+    </ul>
+</div>
+
+<div class="section">
+    <h2>🎯 Ideal Use Cases</h2>
+    <ul>
+        <li>Lightweight browsing</li>
+        <li>Research and documentation</li>
+        <li>Security testing</li>
+        <li>Malware-safe browsing</li>
+        <li>Educational browser engine demo</li>
+    </ul>
+</div>
+
+<div class="section">
+    <h2>💻 Open Source Project</h2>
+    <ul>
+        <li>Source code fully available</li>
+        <li>Auditable design — no hidden components</li>
+        <li>Modular architecture for easy modification</li>
+        <li>Made to teach: HTML parsing, DOM → widget mapping, security filtering</li>
+        <li>Community contributions welcome</li>
+    </ul>
+</div>
+
+<div class="credit">
+    Built with ❤️ in Python + PyQt<br>
+    Completely open-source and free to use.<br><br>
+    <b>Start by typing a URL above.</b>
+</div>
+
+</body>
+</html>
+"""
+
 class BrowserWidget(QWidget):
-    def __init__(self, html="<h1>Welcome to Sentinel</h1>"):
+    def __init__(self, html=HOME_HTML):
         super().__init__()
 
         # --- Container for webpage content ---
@@ -142,6 +256,18 @@ class BrowserWidget(QWidget):
     # ------------------- Main HTML Renderer -------------------
     def setHtml(self, html):
         self.clear_layout()
+        # ---------------- Extract <title> and set tab name ----------------
+        try:
+            title_match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+            page_title = title_match.group(1).strip() if title_match else ""
+
+            if page_title:
+                # Set tab text (MainWindow method)
+                main_window = self.window()
+                if hasattr(main_window, "set_tab_title"):
+                    main_window.set_tab_title(self, page_title)
+        except Exception as e:
+            print(f"[TitleError] Could not extract title: {e}")
 
         # Base URL for resolving relative CSS links
         base_url = ""
@@ -191,7 +317,7 @@ class BrowserWidget(QWidget):
         """Render a single HTML node. All previous logic remains EXACTLY the same."""
         tag = child.tag.lower() if child.tag else ""
 
-        if tag in ["style", "head", "textarea"]:
+        if tag in ["style", "title", "head", "textarea", "script"]:
             return
 
         # ---------------- IMAGE (<img>) ----------------
@@ -378,6 +504,30 @@ class BrowserWidget(QWidget):
             self.page_layout.addWidget(link)
             return
 
+        # ---------------- LISTS (<ul>, <ol>, <li>) ----------------
+        if tag in ["ul", "ol"]:
+            # Create a container widget for the list
+            list_container = QWidget()
+            list_layout = QVBoxLayout(list_container)
+            list_layout.setContentsMargins(10, 5, 5, 5)
+            list_layout.setSpacing(2)
+
+            # Store type so <li> can know whether to show bullets or numbers
+            child.attrs["_list_type"] = tag
+
+            self.apply_css(list_container, tag, child)
+            self.page_layout.addWidget(list_container)
+
+            # Render list children inside this container
+            for li in child.children:
+                self.safe_render(self._render_list_item, li, child, list_layout)
+
+            return
+
+        if tag == "li":
+            # Should not render standalone li outside list
+            return
+
         # ---------------- TEXT ELEMENTS ----------------
         if tag in ["h1", "h2", "h3", "h4", "h5", "h6", "p", "b", "i", "u"]:
             label = QLabel(child.text)
@@ -403,6 +553,34 @@ class BrowserWidget(QWidget):
             self.apply_css(lbl, tag, child)
             self.page_layout.addWidget(lbl)
             return
+    
+    def _render_list_item(self, li_node, parent_list_node, list_layout):
+        """Render a single <li> inside a <ul> or <ol> list."""
+        if li_node.tag != "li":
+            return
+
+        text = li_node.text.strip() if li_node.text else ""
+
+        # Determine bullet style
+        list_type = parent_list_node.attrs.get("_list_type", "ul")
+        if list_type == "ul":
+            bullet = "•"
+        else:  # ordered list
+            # Count current index by how many widgets are already inside
+            index = list_layout.count() + 1
+            bullet = f"{index}."
+
+        # Create label like: "• item" or "1. item"
+        lbl = QLabel(f"{bullet} {text}")
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet("padding-left: 10px;")
+
+        self.apply_css(lbl, "li", li_node)
+        list_layout.addWidget(lbl)
+
+        # If the <li> has nested children (like nested lists), render them
+        for child in li_node.children:
+            self.safe_render(self._render_single_node, child)
 
     # ------------------- Render HTML Nodes -------------------
     def render_nodes(self, node, depth=0):

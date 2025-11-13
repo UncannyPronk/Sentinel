@@ -4,7 +4,7 @@ from .utils import remove_ads_from_html
 
 
 class PageLoader(QThread):
-    finished = pyqtSignal(str)
+    finished = pyqtSignal(object)
     error = pyqtSignal(str)
 
     def __init__(self, url, method="GET", data=None):
@@ -55,9 +55,15 @@ class PageLoader(QThread):
             if not (200 <= response.status_code < 400):
                 self.error.emit(f"<h1>Error {response.status_code}</h1>")
                 return
+            
+            raw_html = response.text
+
+            # Extract title BEFORE cleaning
+            title_match = re.search(r"<title>(.*?)</title>", raw_html, re.IGNORECASE | re.DOTALL)
+            self.page_title = title_match.group(1).strip() if title_match else None
 
             # Clean page
-            html = self.clean_html(response.text)
+            html = self.clean_html(raw_html)
 
             print("[PageLoader] len(html) after clean:", len(html))
 
@@ -66,7 +72,7 @@ class PageLoader(QThread):
             else:
                 print("[PageLoader] ⚠ no <input> tags found!")
 
-            self.finished.emit(html)
+            self.finished.emit((html, self.page_title))
 
         except Exception as e:
             self.error.emit(
