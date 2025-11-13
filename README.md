@@ -14,8 +14,6 @@ It does NOT execute JavaScript, making it ideal for:
 
 Despite being minimal, it supports forms, hyperlinks, images, CSS fallback and safe navigation filtering.
 
-============================================================
-
 ⭐ KEY FEATURES
 ============================================================
 
@@ -99,8 +97,6 @@ Blocked:
 - opacity
 - overlap-based phishing
 
-============================================================
-
 🧱 ARCHITECTURE
 ============================================================
 
@@ -120,8 +116,6 @@ Sentinel/
 
   README.md               This file
 
-============================================================
-
 🚀 RUNNING THE BROWSER
 ============================================================
 
@@ -137,8 +131,6 @@ Install:
 Run:
   python main.py
 
-============================================================
-
 🔧 UPCOMING FEATURES
 ============================================================
 
@@ -151,8 +143,6 @@ Long-term:
 - div layout support
 - span inline formatting
 - Simple CSS box model
-
-============================================================
 
 🧪 TESTING CHECKLIST
 ============================================================
@@ -172,8 +162,6 @@ Rendering:
 - Form-heavy sites
 - Malformed HTML
 - Large HTML pages
-
-============================================================
 
 ❤️ WHY SENTINEL EXISTS
 ============================================================
