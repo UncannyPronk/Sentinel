@@ -1,5 +1,5 @@
 import re, requests
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, parse_qs, unquote
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QScrollArea, QLabel, QPushButton, QLineEdit
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap
@@ -8,7 +8,7 @@ from core.security import is_suspicious_domain
 from bs4 import BeautifulSoup
 
 class BrowserWidget(QWidget):
-    def __init__(self, html="<h1>Welcome to Sentinel Browser Engine</h1>"):
+    def __init__(self, html="<h1>Welcome to Sentinel</h1>"):
         super().__init__()
 
         # --- Container for webpage content ---
@@ -350,32 +350,26 @@ class BrowserWidget(QWidget):
 
             def on_click():
                 main_window = self.window()
+                base_url = main_window.url_bar.text().strip()
 
-                # raw text from URL bar
-                raw_url = main_window.url_bar.text().strip()
+                # Resolve relative → absolute normally
+                resolved = urljoin(base_url, href)
 
-                # --- Normalize base URL ---
-                # Add https:// if missing
-                if not raw_url.startswith(("http://", "https://")):
-                    raw_url = "https://" + raw_url
+                # -----------------------------------------
+                # 🦆 DuckDuckGo Lite redirect cleanup
+                # -----------------------------------------
+                if "duckduckgo.com/l/" in resolved:
+                    try:
+                        qs = parse_qs(urlparse(resolved).query)
+                        if "uddg" in qs:
+                            real_url = unquote(qs["uddg"][0])
+                            print(f"[DDG] Clean redirect → {real_url}")
+                            resolved = real_url
+                    except Exception as e:
+                        print(f"[DDG] Failed to extract uddg: {e}")
 
-                # Ensure it has a trailing slash when needed
-                parsed = urlparse(raw_url)
-                if parsed.path == "" or not parsed.path.endswith("/"):
-                    # Add slash only if it's a domain root or non-file path
-                    if "." not in parsed.path.split("/")[-1]:
-                        raw_url = raw_url + "/"
-
-                # --- Join URLs correctly ---
-                safe_url = urljoin(raw_url, href)
-
-                # print("RAW:", main_window.url_bar.text())
-                # print("NORMALIZED:", raw_url)
-                # print("HREF:", href)
-                # print("RESOLVED:", safe_url)
-
-                # navigate
-                main_window.url_bar.setText(safe_url)
+                # Navigate safely
+                main_window.url_bar.setText(resolved)
                 main_window.goto_url()
 
             link.mousePressEvent = lambda e: on_click()
@@ -486,8 +480,9 @@ class BrowserWidget(QWidget):
             print("[Form] No form node found.")
             return
 
-        # Collect data
+        # ---------------- Collect form inputs ----------------
         data = {}
+
         def collect_inputs(n):
             for c in n.children:
                 if c.tag == "input" and "name" in c.attrs:
@@ -497,62 +492,45 @@ class BrowserWidget(QWidget):
                     else:
                         data[c.attrs["name"]] = c.attrs.get("value", "")
                 collect_inputs(c)
+
         collect_inputs(form_node)
 
-        # Action + method
+        # ---------------- Extract action + method ----------------
         action = form_node.attrs.get("action", "")
         method = form_node.attrs.get("method", "get").lower().strip() or "get"
 
         from urllib.parse import urlencode, urljoin
         main_window = self.window()
+
         base_url = main_window.url_bar.text().strip()
         if not base_url.startswith("http"):
             base_url = "https://" + base_url
+
         action_url = urljoin(base_url, action or "")
 
         print(f"[Form] Submitting to: {action_url} ({method.upper()}) with data={data}")
 
-        try:
-            # --- GET form ---
-            if method == "get":
-                query = urlencode(data)
-                target = f"{action_url}?{query}" if query else action_url
-                main_window.url_bar.setText(target)
-                main_window.goto_url()
-                return
+        # ----------------------------------------------------------
+        # 🦆 DUCKDUCKGO LITE FIX → FORCE GET
+        # DuckDuckGo Lite ignores POST and ALWAYS expects GET query.
+        # ----------------------------------------------------------
+        if "duckduckgo.com/lite" in action_url:
+            print("[DuckDuckGoLite] Forcing GET instead of POST")
+            method = "get"
 
-            # --- POST form (handled by MainWindow loader) ---
-            print(f"[Form] POST {action_url} with data={data}")
-
-            try:
-                main_window.load_page(action_url, method="POST", data=data)
-            except Exception as e:
-                print(f"[Form] Failed to hand POST to loader: {e}")
-
+        # ---------------- Handle GET submission ----------------
+        if method == "get":
+            query = urlencode(data)
+            target = f"{action_url}?{query}" if query else action_url
+            main_window.url_bar.setText(target)
+            main_window.goto_url()
             return
 
-            # ✅ Detect meta refresh redirects (DuckDuckGo lite)
-            match = re.search(r'<meta[^>]+http-equiv=["\']refresh["\'][^>]+content=["\']\d+;\s*url=([^"\']+)["\']', html, re.IGNORECASE)
-            if match:
-                redirect_url = match.group(1).strip()
-                full_redirect = urljoin(action_url, redirect_url)
-                print(f"[Form] Meta refresh detected → Redirecting to {full_redirect}")
-                main_window.url_bar.setText(full_redirect)
-                main_window.goto_url()
-                return
+        # ---------------- Handle POST submission ----------------
+        print(f"[Form] POST → handing off to loader: {action_url}")
 
-            # ✅ If 202 or empty body, fallback to GET query
-            if r.status_code == 202 or len(html) < 100:
-                print("[Form] 202 or empty response — retrying with GET")
-                query = urlencode(data)
-                target = f"{action_url}?{query}" if query else action_url
-                main_window.url_bar.setText(target)
-                main_window.goto_url()
-                return
-
-            # ✅ Otherwise display the page
-            if hasattr(main_window, "current_browser"):
-                main_window.current_browser().setHtml(html)
-
+        try:
+            # Let MainWindow handle POST requests
+            main_window.load_page(action_url, method="POST", data=data)
         except Exception as e:
-            print(f"[Form] Submission failed: {e}")
+            print(f"[Form] Failed POST: {e}")

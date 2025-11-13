@@ -18,7 +18,7 @@ Despite being minimal, it supports forms, hyperlinks, images, CSS fallback and s
 ============================================================
 
 🔐 SECURITY-FIRST DESIGN
-- Homograph (IDN) protection
+- Homograph protection
 - Cross-domain form submission detection
 - Suspicious domain classifier (phishing detection)
 - Blocklist filtering via:
