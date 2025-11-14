@@ -206,3 +206,10 @@ Sentinel is the opposite:
 Minimal, secure, predictable, JavaScript-free.
 
 Ideal for research, education, and cybersecurity experiments.
+
+## Made by CS005 group of U22 batch for College Mini Project
+
+#Team mates:
+  Praveen Raj - [https://github.com/Praveengk07]
+  Yokesh Murugan - [https://github.com/yokeshmurugan-g]
+  Shrivarshaa - [shrivarshaasiva5@gmail.com]
