@@ -10,6 +10,7 @@ It does NOT execute JavaScript, making it ideal for:
 - Low-resource systems
 - Technical reading
 - Security labs
+- Malware-safe link inspection  
 - Testing HTML rendering
 
 Despite being minimal, it supports forms, hyperlinks, images, CSS fallback and safe navigation filtering.
@@ -26,7 +27,7 @@ Despite being minimal, it supports forms, hyperlinks, images, CSS fallback and s
   - Phishing Army
   - URLHaus
 - Sanitized hyperlink navigation
-- Blocks malicious/malware domains
+- Blocks malware/malicious domains
 - ALL JavaScript removed
 - CSS sanitized (prevents phishing UI tricks)
 
@@ -97,6 +98,33 @@ Blocked:
 - opacity
 - overlap-based phishing
 
+------------------------------------------------------------
+
+## 📥 NEW — SAFE FILE DOWNLOADS
+Sentinel now includes a secure download engine.
+
+### ✔️ Safe-by-Default
+- Detects file downloads using URL patterns and response headers  
+- Streaming download to avoid memory bloat  
+- Default save directory: `~/Downloads/Sentinel/`
+
+### ✔️ Malware-Aware
+Automatically blocks dangerous file types by default, e.g.:
+- `.exe`, `.msi`, `.bat`, `.cmd`, `.apk`, `.scr`, `.jar`, `.js`, `.sh`
+
+(You can customize the blocked set in `ui/download_manager.py`.)
+
+### ✔️ No JavaScript Required
+Downloads are handled by the app (using `requests`), not page scripts:
+- streaming
+- safe filename sanitization
+- redirect & header handling
+
+### ✔️ Clear User Feedback
+Success/failure and reasons are displayed in the tab UI.
+
+------------------------------------------------------------
+
 🧱 ARCHITECTURE
 ============================================================
 
@@ -105,11 +133,13 @@ Sentinel/
     page_loader.py        Requests + HTML cleanup + POST handling
     html_parser.py        Custom HTML → DOM tree
     security.py           Domain safety filters, blocklists
+    malware_scanner.py    Dangerous-download detection
     utils.py              Helpers (ad removal, sanitizers)
 
   ui/
     browser_widget.py     DOM → PyQt widgets
     browser_tab.py        Tab container
+    download_manager.py   Safe download system + file prompts
     main_window.py        Title bar, URL bar, navigation, tabs
 
   assets/                 Icons, logo, screenshots
@@ -135,7 +165,6 @@ Run:
 ============================================================
 
 Short-term:
-- File downloads
 - Better SVG rendering
 - Support for more input types
 
@@ -148,13 +177,15 @@ Long-term:
 ============================================================
 
 Security:
-- Homograph detection
-- Suspicious domain detection
+- Homograph / IDN detection tests
+- Suspicious domain detection tests
 - Cross-domain POST blocking
-- Blocklist filtering
-- Sanitized hyperlink navigation
+- Blocklist filtering (StevenBlack, URLHaus, Phishing Army)
+- Sanitized hyperlink navigation (including DuckDuckGo redirects)
+- Mixed-content blocking
 - Ad-domain blocking
 
+Malicious-download blocking (malware scanner integration)
 Rendering:
 - Wikipedia
 - DuckDuckGo Lite
@@ -162,6 +193,9 @@ Rendering:
 - Form-heavy sites
 - Malformed HTML
 - Large HTML pages
+- Local test HTML files covering: css_test, homograph_test, 
+                                  legit_redirect, phish_redirect, 
+                                  downloads, forms, malformed HTML
 
 ❤️ WHY SENTINEL EXISTS
 ============================================================
@@ -172,16 +206,3 @@ Sentinel is the opposite:
 Minimal, secure, predictable, JavaScript-free.
 
 Ideal for research, education, and cybersecurity experiments.
-
-<!-- ============================================================
-👤 AUTHOR
-============================================================
-
-Uncanny Pronk
-
-
-============================================================
-📜 LICENSE
-============================================================
-
-MIT / GPL / or any license you choose. -->

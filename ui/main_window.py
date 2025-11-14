@@ -9,6 +9,7 @@ from core.security import (
 )
 from core.page_loader import PageLoader
 from core.utils import is_local_file
+from ui.download_manager import download_url
 from ui.browser_tab import BrowserTab
 import html as html_lib
 import re
@@ -143,6 +144,10 @@ class MainWindow(QMainWindow):
         browser = self.current_browser()
         if not browser:
             return
+
+        ok, info, path = download_url(url)
+        if ok:
+            return f"<h2>⬇️ Downloaded {info}</h2>", "Downloaded"
 
         browser.show_loading()
         self.url_bar.setDisabled(True)

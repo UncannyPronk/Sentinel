@@ -5,7 +5,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap
 from core.html_parser import TreeHTMLParser
 from core.security import is_suspicious_domain
-from ui.download_manager import download_file
+from ui.download_manager import download_url
 from core.malware_scanner import is_malicious_file
 from bs4 import BeautifulSoup
 
@@ -478,49 +478,30 @@ class BrowserWidget(QWidget):
 
                 resolved = urljoin(base_url, href)
 
-                FILE_EXTS = [".pdf", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".txt",
-             ".csv", ".json", ".xml", ".apk", ".exe", ".bat", ".cmd",
-             ".sh", ".js", ".jar", ".msi", ".scr"]
+                # Try treating link as a download FIRST
+                ok, info, path = download_url(resolved)
 
-                if any(resolved.lower().endswith(ext) for ext in FILE_EXTS):
-                    print("[Download] Detected file download:", resolved)
-
-                    result, reason = is_malicious_file(resolved)
-
-                    if result:
-                        print("[MalwareBlock] Suspicious file:", resolved)
-
-                        warning_html = f"""
-                        <h1>⚠️ File Blocked</h1>
-                        <p><b>{resolved}</b></p>
-                        <p>This file was blocked because:</p>
-                        <p><b>{reason}</b></p>
-                        """
-                        self.page_layout.addWidget(QLabel(warning_html))
-                        return
-
-                    download_file(resolved, parent=self)
-                    return
-                            
-                if self.is_mixed_content(resolved):
-                    print("[MixedContent] Blocked insecure navigation:", resolved)
-                    main_window.current_browser().setHtml("""
-                        <h1>⚠️ Mixed Content Blocked</h1>
-                        <p>This HTTPS page attempted to load an insecure HTTP link.</p>
-                        <p>Sentinel blocked this to keep your browsing secure.</p>
+                if ok:
+                    print("[Download OK]", info, "→", path)
+                    main_window.current_browser().setHtml(f"""
+                        <h2>⬇️ Download complete</h2>
+                        <p>Saved as: <b>{info}</b></p>
+                        <p>Location: <code>{path}</code></p>
                     """)
                     return
 
-                if "duckduckgo.com/l/" in resolved:
-                    try:
-                        qs = parse_qs(urlparse(resolved).query)
-                        if "uddg" in qs:
-                            real_url = unquote(qs["uddg"][0])
-                            print(f"[DDG] Clean redirect → {real_url}")
-                            resolved = real_url
-                    except Exception as e:
-                        print(f"[DDG] Failed to extract uddg: {e}")
+                # If download failed because it's NOT a file → proceed with navigation
+                if info == "Not a file (HTML page)":
+                    pass  # continue to navigation
+                else:
+                    # Some other error
+                    main_window.current_browser().setHtml(f"""
+                        <h2>⚠️ Download blocked</h2>
+                        <p>{info}</p>
+                    """)
+                    return
 
+                # Continue with regular navigation
                 main_window.url_bar.setText(resolved)
                 main_window.goto_url()
 
